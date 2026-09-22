@@ -1,8 +1,9 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useDashboardData } from "@/components/dashboard/DashboardDataProvider";
 
 type UserProfile = {
     id: string;
@@ -24,34 +25,38 @@ export default function UsuariosPage() {
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [role, setRole] = useState("auxiliar");
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [active, setActive] = useState(true);
 
     const [message, setMessage] = useState("");
     const [errorMessage, setErrorMessage] = useState("");
+    const { read, fetch: cacheFetch, invalidate } = useDashboardData();
 
-    const loadUsers = async () => {
-        setLoading(true);
-
-        const { data, error } = await supabase
-            .from("profiles")
-            .select("id, full_name, email, role, active, created_at")
-            .order("created_at", { ascending: false });
-
-        if (error) {
+    const loadUsers = useCallback(async () => {
+        const cached = read<UserProfile[]>("users:all");
+        if (cached) { setUsers(cached.data); setLoading(false); } else setLoading(true);
+        try {
+            const data = await cacheFetch("users:all", async () => {
+                const result = await supabase.from("profiles").select("id, full_name, email, role, active, created_at").order("created_at", { ascending: false });
+                if (result.error) throw result.error;
+                return (result.data || []) as UserProfile[];
+            });
+            setUsers(data);
+        } catch (error) {
+            setErrorMessage("No fue posible consultar los perfiles. Reintenta.");
             console.error("Error cargando usuarios:", error);
-            setLoading(false);
-            return;
-        }
-
-        setUsers(data || []);
-        setLoading(false);
-    };
+        } finally { setLoading(false); }
+    }, [cacheFetch, read]);
 
     useEffect(() => {
+        // Async data bootstrap: pending state is paired with the network request.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         loadUsers();
-    }, []);
+    }, [loadUsers]);
 
     const handleCreateUser = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (creating) return;
 
         setCreating(true);
         setMessage("");
@@ -59,11 +64,13 @@ export default function UsuariosPage() {
 
         try {
             const response = await fetch("/api/admin/users", {
-                method: "POST",
+                method: editingId ? "PATCH" : "POST",
                 headers: {
                     "Content-Type": "application/json",
                 },
                 body: JSON.stringify({
+                    id: editingId,
+                    active,
                     full_name: fullName,
                     email,
                     password,
@@ -79,13 +86,14 @@ export default function UsuariosPage() {
                 return;
             }
 
-            setMessage("Usuario creado correctamente.");
+            setMessage("Usuario guardado correctamente.");
 
             setFullName("");
             setEmail("");
             setPassword("");
             setRole("auxiliar");
 
+            invalidate("users:all");
             await loadUsers();
 
             setTimeout(() => {
@@ -130,6 +138,8 @@ export default function UsuariosPage() {
 
                     <button
                         onClick={() => {
+                            setEditingId(null);
+                            setFullName(""); setEmail(""); setPassword(""); setRole("auxiliar"); setActive(true);
                             setShowForm(true);
                             setMessage("");
                             setErrorMessage("");
@@ -146,7 +156,7 @@ export default function UsuariosPage() {
                         <div className="flex items-center justify-between mb-6">
                             <div>
                                 <h3 className="text-xl font-bold text-slate-900">
-                                    Crear nuevo usuario
+                                    {editingId ? "Editar usuario" : "Crear nuevo usuario"}
                                 </h3>
 
                                 <p className="text-sm text-slate-500 mt-1">
@@ -188,6 +198,7 @@ export default function UsuariosPage() {
 
                                     <input
                                         type="email"
+                                        disabled={!!editingId}
                                         value={email}
                                         onChange={(e) => setEmail(e.target.value)}
                                         required
@@ -197,7 +208,7 @@ export default function UsuariosPage() {
                                 </div>
 
                                 {/* Contraseña */}
-                                <div>
+                                <div hidden={!!editingId}>
                                     <label className="block text-sm font-medium text-slate-700 mb-2">
                                         Contraseña
                                     </label>
@@ -206,7 +217,7 @@ export default function UsuariosPage() {
                                         type="password"
                                         value={password}
                                         onChange={(e) => setPassword(e.target.value)}
-                                        required
+                                        required={!editingId}
                                         minLength={6}
                                         className="w-full border border-slate-300 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-slate-500"
                                         placeholder="Mínimo 6 caracteres"
@@ -225,12 +236,13 @@ export default function UsuariosPage() {
                                         className="w-full border border-slate-300 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-slate-500 bg-white"
                                     >
                                         <option value="auxiliar">Auxiliar</option>
-                                        <option value="ingeniero">Ingeniero</option>
+                                        <option value="planeador">Planeador</option>
                                         <option value="administrador">Administrador</option>
                                     </select>
                                 </div>
                             </div>
 
+                            {editingId && <label className="mt-4 flex gap-2"><input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />Usuario activo</label>}
                             {/* Mensajes */}
                             {message && (
                                 <div className="mt-5 bg-green-100 text-green-700 rounded-xl px-4 py-3">
@@ -259,7 +271,7 @@ export default function UsuariosPage() {
                                     disabled={creating}
                                     className="px-5 py-3 rounded-xl bg-slate-900 text-white font-semibold hover:bg-slate-800 disabled:opacity-50"
                                 >
-                                    {creating ? "Creando..." : "Crear usuario"}
+                                    {creating ? "Guardando..." : "Guardar usuario"}
                                 </button>
                             </div>
                         </form>
@@ -267,6 +279,7 @@ export default function UsuariosPage() {
                 )}
 
                 {/* Tabla */}
+                {!showForm && errorMessage && <p role="alert" className="mb-4 rounded-xl bg-red-50 p-4 text-red-700">{errorMessage} <button onClick={() => { setErrorMessage(""); void loadUsers(); }} className="underline">Reintentar</button></p>}
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                     {loading ? (
                         <div className="p-8 text-center text-slate-500">
@@ -300,6 +313,7 @@ export default function UsuariosPage() {
                                         <th className="text-left px-6 py-4 text-sm font-semibold text-slate-600">
                                             Fecha de creación
                                         </th>
+                                        <th className="px-6 py-4">Acciones</th>
                                     </tr>
                                 </thead>
 
@@ -338,6 +352,7 @@ export default function UsuariosPage() {
                                             <td className="px-6 py-4 text-slate-600">
                                                 {new Date(user.created_at).toLocaleDateString("es-CO")}
                                             </td>
+                                            <td className="px-6 py-4"><button className="rounded-lg border px-3 py-2" onClick={() => { setEditingId(user.id); setFullName(user.full_name); setEmail(user.email); setRole(user.role); setActive(user.active); setPassword(""); setMessage(""); setErrorMessage(""); setShowForm(true); }}>Editar</button></td>
                                         </tr>
                                     ))}
                                 </tbody>

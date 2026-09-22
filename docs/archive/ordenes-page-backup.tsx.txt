@@ -1,0 +1,1770 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
+
+type Role = "administrador" | "ingeniero" | "auxiliar";
+
+type Site = {
+    id: number;
+    name: string;
+    address: string | null;
+    city: string | null;
+    is_copropiedad: boolean;
+    active: boolean;
+};
+
+type Provider = {
+    id: number;
+    name: string;
+    site_id: number;
+    active: boolean;
+};
+
+type DocumentCheck = {
+    id: number;
+    order_id: number;
+    check_type:
+    | "seguridad_social"
+    | "coach"
+    | "sst"
+    | "copropiedad";
+    status: "pendiente" | "cumple" | "no_cumple";
+    observation: string | null;
+    validated_by: string | null;
+    validated_at: string | null;
+};
+
+type MaintenanceOrder = {
+    id: number;
+    order_number: number;
+    parent_order_id: number | null;
+    root_order_id: number | null;
+    reprogramming_number: number;
+    site_id: number;
+    provider_id: number;
+    maintenance_type: "preventivo" | "correctivo";
+    description: string;
+    scheduled_date: string;
+    status:
+    | "pendiente"
+    | "programada"
+    | "en_ejecucion"
+    | "completada"
+    | "reprogramada"
+    | "cancelada";
+    created_by: string;
+    created_at: string;
+    reprogramming_reason: string | null;
+    reprogrammed_by: string | null;
+    reprogrammed_at: string | null;
+
+    sites?: {
+        name: string;
+        is_copropiedad: boolean;
+    } | null;
+
+    providers?: {
+        name: string;
+    } | null;
+};
+
+type Profile = {
+    id: string;
+    full_name: string;
+    role: Role;
+    active: boolean;
+};
+
+const checkLabels: Record<string, string> = {
+    seguridad_social: "Seguridad social",
+    coach: "Notificación COACH",
+    sst: "Notificación SST",
+    copropiedad: "Notificación Copropiedad",
+};
+
+const checkStatusLabels: Record<string, string> = {
+    pendiente: "Pendiente",
+    cumple: "Cumple",
+    no_cumple: "No cumple",
+};
+
+const statusLabels: Record<string, string> = {
+    pendiente: "Pendiente",
+    programada: "Programada",
+    en_ejecucion: "En ejecución",
+    completada: "Completada",
+    reprogramada: "Reprogramada",
+    cancelada: "Cancelada",
+};
+
+function formatOrderNumber(number: number) {
+    return `OT-${String(number).padStart(6, "0")}`;
+}
+
+function formatDate(date: string) {
+    if (!date) return "-";
+
+    const [year, month, day] = date.split("-");
+
+    return `${day}/${month}/${year}`;
+}
+
+function getStatusClass(status: string) {
+    switch (status) {
+        case "programada":
+            return "bg-blue-50 text-blue-700";
+
+        case "en_ejecucion":
+            return "bg-amber-50 text-amber-700";
+
+        case "completada":
+            return "bg-green-50 text-green-700";
+
+        case "reprogramada":
+            return "bg-purple-50 text-purple-700";
+
+        case "cancelada":
+            return "bg-red-50 text-red-700";
+
+        default:
+            return "bg-gray-100 text-gray-700";
+    }
+}
+
+function getCheckClass(status: string) {
+    switch (status) {
+        case "cumple":
+            return "border-green-200 bg-green-50 text-green-700";
+
+        case "no_cumple":
+            return "border-red-200 bg-red-50 text-red-700";
+
+        default:
+            return "border-gray-200 bg-gray-50 text-gray-700";
+    }
+}
+
+export default function OrdenesPage() {
+    const [profile, setProfile] = useState<Profile | null>(null);
+
+    const [sites, setSites] = useState<Site[]>([]);
+    const [providers, setProviders] = useState<Provider[]>([]);
+    const [orders, setOrders] = useState<MaintenanceOrder[]>([]);
+
+    const [loadingReferences, setLoadingReferences] = useState(true);
+    const [loadingOrders, setLoadingOrders] = useState(true);
+
+    const [saving, setSaving] = useState(false);
+    const [loadingChecks, setLoadingChecks] = useState(false);
+
+    const [message, setMessage] = useState("");
+    const [error, setError] = useState("");
+
+    const [search, setSearch] = useState("");
+
+    const [selectedOrderId, setSelectedOrderId] =
+        useState<number | null>(null);
+
+    const [selectedChecks, setSelectedChecks] =
+        useState<DocumentCheck[]>([]);
+
+    const [showCreateForm, setShowCreateForm] =
+        useState(false);
+
+    const [showReprogramForm, setShowReprogramForm] =
+        useState(false);
+
+    const [form, setForm] = useState({
+        siteId: "",
+        providerId: "",
+        maintenanceType: "preventivo",
+        description: "",
+        scheduledDate: "",
+    });
+
+    const [reprogramForm, setReprogramForm] = useState({
+        scheduledDate: "",
+        reason: "",
+    });
+
+    /*
+     * =========================================================
+     * CARGA INICIAL
+     * =========================================================
+     *
+     * Importante:
+     * Las validaciones YA NO se cargan aquí.
+     *
+     * Solo cargamos:
+     * - Perfil
+     * - Sedes
+     * - Proveedores
+     * - Órdenes
+     */
+
+    const loadInitialData = async () => {
+        setError("");
+
+        try {
+            const {
+                data: { user },
+            } = await supabase.auth.getUser();
+
+            if (!user) {
+                window.location.href = "/";
+                return;
+            }
+
+            setLoadingReferences(true);
+            setLoadingOrders(true);
+
+            const [profileResult, sitesResult, providersResult, ordersResult] =
+                await Promise.all([
+                    supabase
+                        .from("profiles")
+                        .select("id, full_name, role, active")
+                        .eq("id", user.id)
+                        .single(),
+
+                    supabase
+                        .from("sites")
+                        .select(
+                            "id, name, address, city, is_copropiedad, active"
+                        )
+                        .eq("active", true)
+                        .order("name"),
+
+                    supabase
+                        .from("providers")
+                        .select("id, name, site_id, active")
+                        .eq("active", true)
+                        .order("name"),
+
+                    /*
+                     * LIMITAMOS LA CARGA INICIAL.
+                     *
+                     * Antes se descargaban todas las OT y todas
+                     * sus validaciones.
+                     *
+                     * Ahora solamente traemos las 100 más recientes.
+                     */
+                    supabase
+                        .from("maintenance_orders")
+                        .select(`
+                            id,
+                            order_number,
+                            parent_order_id,
+                            root_order_id,
+                            reprogramming_number,
+                            site_id,
+                            provider_id,
+                            maintenance_type,
+                            description,
+                            scheduled_date,
+                            status,
+                            created_by,
+                            created_at,
+                            reprogramming_reason,
+                            reprogrammed_by,
+                            reprogrammed_at,
+                            sites (
+                                name,
+                                is_copropiedad
+                            ),
+                            providers (
+                                name
+                            )
+                        `)
+                        .order("created_at", {
+                            ascending: false,
+                        })
+                        .limit(100),
+                ]);
+
+            if (profileResult.error) {
+                throw profileResult.error;
+            }
+
+            if (sitesResult.error) {
+                throw sitesResult.error;
+            }
+
+            if (providersResult.error) {
+                throw providersResult.error;
+            }
+
+            if (ordersResult.error) {
+                throw ordersResult.error;
+            }
+
+            setProfile(profileResult.data as Profile);
+
+            setSites((sitesResult.data || []) as Site[]);
+
+            setProviders((providersResult.data || []) as Provider[]);
+
+            setOrders(
+                (ordersResult.data || []) as unknown as MaintenanceOrder[]
+            );
+        } catch (err: any) {
+            console.error(err);
+
+            setError(
+                err?.message ||
+                "No fue posible cargar la información."
+            );
+        } finally {
+            setLoadingReferences(false);
+            setLoadingOrders(false);
+        }
+    };
+
+    useEffect(() => {
+        loadInitialData();
+    }, []);
+
+    /*
+     * =========================================================
+     * PROVEEDORES SEGÚN SEDE
+     * =========================================================
+     */
+
+    const filteredProviders = useMemo(() => {
+        if (!form.siteId) return [];
+
+        return providers.filter(
+            (provider) =>
+                provider.site_id === Number(form.siteId)
+        );
+    }, [providers, form.siteId]);
+
+    /*
+     * =========================================================
+     * ORDEN SELECCIONADA
+     * =========================================================
+     */
+
+    const selectedOrder = useMemo(() => {
+        return orders.find(
+            (order) => order.id === selectedOrderId
+        );
+    }, [orders, selectedOrderId]);
+
+    /*
+     * =========================================================
+     * FAMILIA DE REPROGRAMACIONES
+     * =========================================================
+     */
+
+    const orderFamily = useMemo(() => {
+        if (!selectedOrder) return [];
+
+        const rootId =
+            selectedOrder.root_order_id ||
+            selectedOrder.id;
+
+        return orders
+            .filter(
+                (order) =>
+                    (order.root_order_id || order.id) ===
+                    rootId
+            )
+            .sort(
+                (a, b) =>
+                    a.reprogramming_number -
+                    b.reprogramming_number
+            );
+    }, [orders, selectedOrder]);
+
+    /*
+     * =========================================================
+     * BÚSQUEDA
+     * =========================================================
+     */
+
+    const filteredOrders = useMemo(() => {
+        const term = search.trim().toLowerCase();
+
+        if (!term) return orders;
+
+        return orders.filter((order) => {
+            const orderNumber =
+                formatOrderNumber(
+                    order.order_number
+                ).toLowerCase();
+
+            const site =
+                order.sites?.name?.toLowerCase() || "";
+
+            const provider =
+                order.providers?.name?.toLowerCase() || "";
+
+            const description =
+                order.description?.toLowerCase() || "";
+
+            return (
+                orderNumber.includes(term) ||
+                site.includes(term) ||
+                provider.includes(term) ||
+                description.includes(term)
+            );
+        });
+    }, [orders, search]);
+
+    /*
+     * =========================================================
+     * PERMISOS
+     * =========================================================
+     */
+
+    const canCreate =
+        profile?.role === "ingeniero" ||
+        profile?.role === "administrador";
+
+    const canReprogram =
+        profile?.role === "ingeniero" ||
+        profile?.role === "administrador";
+
+    const canValidate =
+        profile?.role === "auxiliar" ||
+        profile?.role === "administrador";
+
+    /*
+     * =========================================================
+     * CARGAR VALIDACIONES SOLO AL ABRIR UNA OT
+     * =========================================================
+     */
+
+    const loadChecks = async (orderId: number) => {
+        setLoadingChecks(true);
+        setSelectedChecks([]);
+
+        try {
+            const { data, error } = await supabase
+                .from("order_document_checks")
+                .select(`
+                    id,
+                    order_id,
+                    check_type,
+                    status,
+                    observation,
+                    validated_by,
+                    validated_at
+                `)
+                .eq("order_id", orderId)
+                .order("id");
+
+            if (error) {
+                throw error;
+            }
+
+            setSelectedChecks(
+                (data || []) as DocumentCheck[]
+            );
+        } catch (err: any) {
+            console.error(err);
+
+            setError(
+                err?.message ||
+                "No fue posible cargar las validaciones."
+            );
+        } finally {
+            setLoadingChecks(false);
+        }
+    };
+
+    /*
+     * =========================================================
+     * ABRIR DETALLE
+     * =========================================================
+     */
+
+    const openOrder = async (orderId: number) => {
+        setError("");
+        setMessage("");
+
+        setSelectedOrderId(orderId);
+        setShowReprogramForm(false);
+
+        await loadChecks(orderId);
+    };
+
+    /*
+     * =========================================================
+     * CREAR ORDEN
+     * =========================================================
+     */
+
+    const createOrder = async (
+        event: React.FormEvent
+    ) => {
+        event.preventDefault();
+
+        setError("");
+        setMessage("");
+
+        if (
+            !form.siteId ||
+            !form.providerId ||
+            !form.maintenanceType ||
+            !form.description.trim() ||
+            !form.scheduledDate
+        ) {
+            setError(
+                "Completa todos los campos obligatorios."
+            );
+            return;
+        }
+
+        setSaving(true);
+
+        try {
+            const { data, error } = await supabase.rpc(
+                "create_maintenance_order",
+                {
+                    p_site_id: Number(form.siteId),
+                    p_provider_id: Number(form.providerId),
+                    p_maintenance_type:
+                        form.maintenanceType,
+                    p_description:
+                        form.description.trim(),
+                    p_scheduled_date:
+                        form.scheduledDate,
+                }
+            );
+
+            if (error) {
+                throw error;
+            }
+
+            const newOrderNumber = Number(data);
+
+            /*
+             * Buscamos SOLO la nueva OT.
+             * Ya no volvemos a cargar las 100 OT.
+             */
+
+            const { data: newOrder, error: newOrderError } =
+                await supabase
+                    .from("maintenance_orders")
+                    .select(`
+                        id,
+                        order_number,
+                        parent_order_id,
+                        root_order_id,
+                        reprogramming_number,
+                        site_id,
+                        provider_id,
+                        maintenance_type,
+                        description,
+                        scheduled_date,
+                        status,
+                        created_by,
+                        created_at,
+                        reprogramming_reason,
+                        reprogrammed_by,
+                        reprogrammed_at,
+                        sites (
+                            name,
+                            is_copropiedad
+                        ),
+                        providers (
+                            name
+                        )
+                    `)
+                    .eq("order_number", newOrderNumber)
+                    .single();
+
+            if (newOrderError) {
+                throw newOrderError;
+            }
+
+            setOrders((currentOrders) => [
+                newOrder as unknown as MaintenanceOrder,
+                ...currentOrders,
+            ]);
+
+            setMessage(
+                `Orden ${formatOrderNumber(
+                    newOrderNumber
+                )} creada correctamente.`
+            );
+
+            setForm({
+                siteId: "",
+                providerId: "",
+                maintenanceType: "preventivo",
+                description: "",
+                scheduledDate: "",
+            });
+
+            setShowCreateForm(false);
+
+            setSelectedOrderId(
+                Number(newOrder.id)
+            );
+
+            await loadChecks(Number(newOrder.id));
+        } catch (err: any) {
+            console.error(err);
+
+            setError(
+                err?.message ||
+                "No fue posible crear la orden."
+            );
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    /*
+     * =========================================================
+     * REPROGRAMAR
+     * =========================================================
+     */
+
+    const reprogramOrder = async (
+        event: React.FormEvent
+    ) => {
+        event.preventDefault();
+
+        if (!selectedOrder) return;
+
+        setError("");
+        setMessage("");
+
+        if (
+            !reprogramForm.scheduledDate ||
+            !reprogramForm.reason.trim()
+        ) {
+            setError(
+                "Indica la nueva fecha y el motivo."
+            );
+            return;
+        }
+
+        setSaving(true);
+
+        try {
+            const { data, error } = await supabase.rpc(
+                "reprogram_maintenance_order",
+                {
+                    p_parent_order_id:
+                        selectedOrder.id,
+
+                    p_new_scheduled_date:
+                        reprogramForm.scheduledDate,
+
+                    p_reason:
+                        reprogramForm.reason.trim(),
+                }
+            );
+
+            if (error) {
+                throw error;
+            }
+
+            const newOrderNumber = Number(data);
+
+            /*
+             * Traemos únicamente la nueva OT.
+             */
+
+            const {
+                data: newOrder,
+                error: newOrderError,
+            } = await supabase
+                .from("maintenance_orders")
+                .select(`
+                    id,
+                    order_number,
+                    parent_order_id,
+                    root_order_id,
+                    reprogramming_number,
+                    site_id,
+                    provider_id,
+                    maintenance_type,
+                    description,
+                    scheduled_date,
+                    status,
+                    created_by,
+                    created_at,
+                    reprogramming_reason,
+                    reprogrammed_by,
+                    reprogrammed_at,
+                    sites (
+                        name,
+                        is_copropiedad
+                    ),
+                    providers (
+                        name
+                    )
+                `)
+                .eq("order_number", newOrderNumber)
+                .single();
+
+            if (newOrderError) {
+                throw newOrderError;
+            }
+
+            /*
+             * Actualizamos el estado de la OT anterior
+             * localmente, sin volver a cargar todo.
+             */
+
+            setOrders((currentOrders) =>
+                [
+                    newOrder as unknown as MaintenanceOrder,
+                    ...currentOrders.map((order) =>
+                        order.id === selectedOrder.id
+                            ? {
+                                ...order,
+                                status: "reprogramada" as const,
+                            }
+                            : order
+                    ),
+                ]
+            );
+
+            setMessage(
+                `Nueva orden ${formatOrderNumber(
+                    newOrderNumber
+                )} creada por reprogramación.`
+            );
+
+            setReprogramForm({
+                scheduledDate: "",
+                reason: "",
+            });
+
+            setShowReprogramForm(false);
+
+            setSelectedOrderId(
+                Number(newOrder.id)
+            );
+
+            await loadChecks(Number(newOrder.id));
+        } catch (err: any) {
+            console.error(err);
+
+            setError(
+                err?.message ||
+                "No fue posible reprogramar la orden."
+            );
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    /*
+     * =========================================================
+     * ACTUALIZAR VALIDACIÓN
+     * =========================================================
+     */
+
+    const updateCheck = async (
+        check: DocumentCheck,
+        status: DocumentCheck["status"],
+        observation: string
+    ) => {
+        if (!profile) return;
+
+        setError("");
+        setMessage("");
+
+        try {
+            const {
+                data: { user },
+            } = await supabase.auth.getUser();
+
+            if (!user) {
+                throw new Error(
+                    "No hay una sesión activa."
+                );
+            }
+
+            const updateData = {
+                status,
+                observation:
+                    observation.trim() || null,
+
+                validated_by:
+                    status === "pendiente"
+                        ? null
+                        : user.id,
+
+                validated_at:
+                    status === "pendiente"
+                        ? null
+                        : new Date().toISOString(),
+            };
+
+            const { error } = await supabase
+                .from("order_document_checks")
+                .update(updateData)
+                .eq("id", check.id);
+
+            if (error) {
+                throw error;
+            }
+
+            /*
+             * Actualizamos solamente la validación
+             * que acaba de cambiar.
+             */
+
+            setSelectedChecks((currentChecks) =>
+                currentChecks.map((currentCheck) =>
+                    currentCheck.id === check.id
+                        ? {
+                            ...currentCheck,
+                            ...updateData,
+                        }
+                        : currentCheck
+                )
+            );
+
+            setMessage(
+                "Validación actualizada correctamente."
+            );
+        } catch (err: any) {
+            console.error(err);
+
+            setError(
+                err?.message ||
+                "No fue posible actualizar la validación."
+            );
+        }
+    };
+
+    /*
+     * =========================================================
+     * SEDE SELECCIONADA
+     * =========================================================
+     */
+
+    const selectedSite = useMemo(() => {
+        return sites.find(
+            (site) =>
+                site.id === Number(form.siteId)
+        );
+    }, [sites, form.siteId]);
+
+    /*
+     * =========================================================
+     * PANTALLA
+     * =========================================================
+     */
+
+    return (
+        <main className="min-h-screen bg-gray-50 p-4 md:p-6">
+            <div className="mx-auto max-w-7xl space-y-6">
+
+                {/* =================================================
+                    ENCABEZADO
+                ================================================= */}
+
+                <section className="flex flex-col gap-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <p className="text-sm font-medium text-blue-600">
+                            Gestión operativa
+                        </p>
+
+                        <h1 className="mt-1 text-2xl font-bold text-gray-900">
+                            Órdenes de mantenimiento
+                        </h1>
+
+                        <p className="mt-1 text-sm text-gray-500">
+                            Creación, seguimiento,
+                            validaciones y reprogramaciones.
+                        </p>
+                    </div>
+
+                    {canCreate && (
+                        <button
+                            type="button"
+                            onClick={() =>
+                                setShowCreateForm(
+                                    !showCreateForm
+                                )
+                            }
+                            className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+                        >
+                            {showCreateForm
+                                ? "Cerrar"
+                                : "+ Nueva orden"}
+                        </button>
+                    )}
+                </section>
+
+                {/* =================================================
+                    MENSAJES
+                ================================================= */}
+
+                {message && (
+                    <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+                        {message}
+                    </div>
+                )}
+
+                {error && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                        {error}
+                    </div>
+                )}
+
+                {/* =================================================
+                    FORMULARIO CREAR OT
+                ================================================= */}
+
+                {showCreateForm && canCreate && (
+                    <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+
+                        <div className="mb-6">
+                            <h2 className="text-xl font-bold text-gray-900">
+                                Crear orden de mantenimiento
+                            </h2>
+
+                            <p className="mt-1 text-sm text-gray-500">
+                                La OT será creada con un número automático.
+                            </p>
+                        </div>
+
+                        {loadingReferences ? (
+                            <div className="rounded-xl bg-gray-50 p-5 text-sm text-gray-500">
+                                Cargando sedes y proveedores...
+                            </div>
+                        ) : (
+                            <form
+                                onSubmit={createOrder}
+                                className="grid gap-5 md:grid-cols-2"
+                            >
+
+                                {/* SEDE */}
+
+                                <div>
+                                    <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                        Sede *
+                                    </label>
+
+                                    <select
+                                        value={form.siteId}
+                                        onChange={(event) => {
+                                            setForm({
+                                                ...form,
+                                                siteId:
+                                                    event.target.value,
+                                                providerId: "",
+                                            });
+                                        }}
+                                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                    >
+                                        <option value="">
+                                            Selecciona una sede
+                                        </option>
+
+                                        {sites.map((site) => (
+                                            <option
+                                                key={site.id}
+                                                value={site.id}
+                                            >
+                                                {site.name}
+                                                {site.is_copropiedad
+                                                    ? " · Copropiedad"
+                                                    : ""}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* PROVEEDOR */}
+
+                                <div>
+                                    <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                        Proveedor *
+                                    </label>
+
+                                    <select
+                                        value={form.providerId}
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                providerId:
+                                                    event.target.value,
+                                            })
+                                        }
+                                        disabled={!form.siteId}
+                                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-gray-100 disabled:text-gray-500"
+                                    >
+                                        <option value="">
+                                            {!form.siteId
+                                                ? "Primero selecciona una sede"
+                                                : filteredProviders.length === 0
+                                                    ? "No hay proveedores para esta sede"
+                                                    : "Selecciona un proveedor"}
+                                        </option>
+
+                                        {filteredProviders.map(
+                                            (provider) => (
+                                                <option
+                                                    key={provider.id}
+                                                    value={provider.id}
+                                                >
+                                                    {provider.name}
+                                                </option>
+                                            )
+                                        )}
+                                    </select>
+                                </div>
+
+                                {/* TIPO */}
+
+                                <div>
+                                    <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                        Tipo de mantenimiento *
+                                    </label>
+
+                                    <select
+                                        value={
+                                            form.maintenanceType
+                                        }
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                maintenanceType:
+                                                    event.target.value,
+                                            })
+                                        }
+                                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                    >
+                                        <option value="preventivo">
+                                            Preventivo
+                                        </option>
+
+                                        <option value="correctivo">
+                                            Correctivo
+                                        </option>
+                                    </select>
+                                </div>
+
+                                {/* FECHA */}
+
+                                <div>
+                                    <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                        Fecha programada *
+                                    </label>
+
+                                    <input
+                                        type="date"
+                                        value={
+                                            form.scheduledDate
+                                        }
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                scheduledDate:
+                                                    event.target.value,
+                                            })
+                                        }
+                                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                    />
+                                </div>
+
+                                {/* DESCRIPCIÓN */}
+
+                                <div className="md:col-span-2">
+                                    <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                        Descripción *
+                                    </label>
+
+                                    <textarea
+                                        value={form.description}
+                                        onChange={(event) =>
+                                            setForm({
+                                                ...form,
+                                                description:
+                                                    event.target.value,
+                                            })
+                                        }
+                                        rows={4}
+                                        placeholder="Describe el mantenimiento que se debe realizar..."
+                                        className="w-full resize-none rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 placeholder:text-gray-400 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                    />
+                                </div>
+
+                                {/* AVISO COPROPIEDAD */}
+
+                                {selectedSite?.is_copropiedad && (
+                                    <div className="md:col-span-2 rounded-xl border border-purple-200 bg-purple-50 p-4 text-sm text-purple-700">
+                                        Esta sede es una{" "}
+                                        <strong>copropiedad</strong>.
+                                        <br />
+                                        Al crear la OT se agregará
+                                        automáticamente la validación
+                                        de Notificación Copropiedad.
+                                    </div>
+                                )}
+
+                                {/* BOTÓN */}
+
+                                <div className="flex justify-end md:col-span-2">
+                                    <button
+                                        type="submit"
+                                        disabled={saving}
+                                        className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        {saving
+                                            ? "Creando..."
+                                            : "Crear orden"}
+                                    </button>
+                                </div>
+                            </form>
+                        )}
+                    </section>
+                )}
+
+                {/* =================================================
+                    BUSCADOR
+                ================================================= */}
+
+                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 className="font-semibold text-gray-900">
+                                Órdenes registradas
+                            </h2>
+
+                            <p className="mt-1 text-sm text-gray-500">
+                                {loadingOrders
+                                    ? "Cargando órdenes..."
+                                    : `${orders.length} órdenes cargadas`}
+                            </p>
+                        </div>
+
+                        <input
+                            type="text"
+                            value={search}
+                            onChange={(event) =>
+                                setSearch(event.target.value)
+                            }
+                            placeholder="Buscar OT, sede, proveedor..."
+                            className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 placeholder:text-gray-400 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 md:w-96"
+                        />
+                    </div>
+                </section>
+
+                {/* =================================================
+                    TABLA
+                ================================================= */}
+
+                <section className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+
+                    {loadingOrders ? (
+                        <div className="p-10 text-center">
+                            <div className="mx-auto h-7 w-7 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600" />
+
+                            <p className="mt-4 text-sm text-gray-500">
+                                Cargando órdenes...
+                            </p>
+                        </div>
+                    ) : filteredOrders.length === 0 ? (
+                        <div className="p-10 text-center text-sm text-gray-500">
+                            {search
+                                ? "No hay órdenes que coincidan con la búsqueda."
+                                : "No hay órdenes registradas."}
+                        </div>
+                    ) : (
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm">
+
+                                <thead className="border-b bg-gray-50">
+                                    <tr>
+                                        <th className="px-5 py-4 font-semibold text-gray-700">
+                                            OT
+                                        </th>
+
+                                        <th className="px-5 py-4 font-semibold text-gray-700">
+                                            Sede
+                                        </th>
+
+                                        <th className="px-5 py-4 font-semibold text-gray-700">
+                                            Proveedor
+                                        </th>
+
+                                        <th className="px-5 py-4 font-semibold text-gray-700">
+                                            Tipo
+                                        </th>
+
+                                        <th className="px-5 py-4 font-semibold text-gray-700">
+                                            Fecha
+                                        </th>
+
+                                        <th className="px-5 py-4 font-semibold text-gray-700">
+                                            Estado
+                                        </th>
+
+                                        <th className="px-5 py-4" />
+                                    </tr>
+                                </thead>
+
+                                <tbody className="divide-y">
+                                    {filteredOrders.map(
+                                        (order) => (
+                                            <tr
+                                                key={order.id}
+                                                className="transition hover:bg-gray-50"
+                                            >
+                                                <td className="px-5 py-4">
+                                                    <div className="font-bold text-gray-900">
+                                                        {formatOrderNumber(
+                                                            order.order_number
+                                                        )}
+                                                    </div>
+
+                                                    {order.reprogramming_number >
+                                                        0 && (
+                                                            <div className="mt-1 text-xs text-purple-600">
+                                                                Reprogramación{" "}
+                                                                {
+                                                                    order.reprogramming_number
+                                                                }
+                                                            </div>
+                                                        )}
+                                                </td>
+
+                                                <td className="px-5 py-4 text-gray-700">
+                                                    {order.sites?.name ||
+                                                        "-"}
+                                                </td>
+
+                                                <td className="px-5 py-4 text-gray-700">
+                                                    {order.providers?.name ||
+                                                        "-"}
+                                                </td>
+
+                                                <td className="px-5 py-4 capitalize text-gray-700">
+                                                    {order.maintenance_type}
+                                                </td>
+
+                                                <td className="px-5 py-4 text-gray-700">
+                                                    {formatDate(
+                                                        order.scheduled_date
+                                                    )}
+                                                </td>
+
+                                                <td className="px-5 py-4">
+                                                    <span
+                                                        className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${getStatusClass(
+                                                            order.status
+                                                        )}`}
+                                                    >
+                                                        {
+                                                            statusLabels[
+                                                            order.status
+                                                            ]
+                                                        }
+                                                    </span>
+                                                </td>
+
+                                                <td className="px-5 py-4 text-right">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            openOrder(
+                                                                order.id
+                                                            )
+                                                        }
+                                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-50"
+                                                    >
+                                                        Ver detalle
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        )
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </section>
+
+                {/* =================================================
+                    DETALLE DE OT
+                ================================================= */}
+
+                {selectedOrder && (
+                    <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+
+                        {/* CABECERA DEL DETALLE */}
+
+                        <div className="flex flex-col gap-4 border-b pb-5 md:flex-row md:items-start md:justify-between">
+
+                            <div>
+                                <div className="flex flex-wrap items-center gap-3">
+
+                                    <h2 className="text-xl font-bold text-gray-900">
+                                        {formatOrderNumber(
+                                            selectedOrder.order_number
+                                        )}
+                                    </h2>
+
+                                    <span
+                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${getStatusClass(
+                                            selectedOrder.status
+                                        )}`}
+                                    >
+                                        {
+                                            statusLabels[
+                                            selectedOrder.status
+                                            ]
+                                        }
+                                    </span>
+                                </div>
+
+                                <p className="mt-2 text-sm text-gray-500">
+                                    {selectedOrder.sites?.name ||
+                                        "-"}{" "}
+                                    ·{" "}
+                                    {selectedOrder.providers?.name ||
+                                        "-"}
+                                </p>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+
+                                {canReprogram &&
+                                    selectedOrder.status !==
+                                    "reprogramada" &&
+                                    selectedOrder.status !==
+                                    "completada" &&
+                                    selectedOrder.status !==
+                                    "cancelada" && (
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setShowReprogramForm(
+                                                    !showReprogramForm
+                                                )
+                                            }
+                                            className="rounded-xl border border-purple-200 bg-purple-50 px-4 py-2 text-sm font-semibold text-purple-700 transition hover:bg-purple-100"
+                                        >
+                                            Reprogramar
+                                        </button>
+                                    )}
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSelectedOrderId(null);
+                                        setSelectedChecks([]);
+                                        setShowReprogramForm(false);
+                                    }}
+                                    className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
+                                >
+                                    Cerrar
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* INFORMACIÓN */}
+
+                        <div className="grid gap-5 py-6 md:grid-cols-4">
+
+                            <div>
+                                <p className="text-xs font-medium uppercase text-gray-400">
+                                    Tipo
+                                </p>
+
+                                <p className="mt-1 font-semibold capitalize text-gray-900">
+                                    {selectedOrder.maintenance_type}
+                                </p>
+                            </div>
+
+                            <div>
+                                <p className="text-xs font-medium uppercase text-gray-400">
+                                    Fecha programada
+                                </p>
+
+                                <p className="mt-1 font-semibold text-gray-900">
+                                    {formatDate(
+                                        selectedOrder.scheduled_date
+                                    )}
+                                </p>
+                            </div>
+
+                            <div>
+                                <p className="text-xs font-medium uppercase text-gray-400">
+                                    Reprogramación
+                                </p>
+
+                                <p className="mt-1 font-semibold text-gray-900">
+                                    {selectedOrder.reprogramming_number}
+                                </p>
+                            </div>
+
+                            <div>
+                                <p className="text-xs font-medium uppercase text-gray-400">
+                                    Sede
+                                </p>
+
+                                <p className="mt-1 font-semibold text-gray-900">
+                                    {selectedOrder.sites?.name ||
+                                        "-"}
+                                </p>
+                            </div>
+
+                            <div className="md:col-span-4">
+                                <p className="text-xs font-medium uppercase text-gray-400">
+                                    Descripción
+                                </p>
+
+                                <p className="mt-1 rounded-xl bg-gray-50 p-4 text-sm leading-6 text-gray-700">
+                                    {selectedOrder.description}
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* =================================================
+                            REPROGRAMACIÓN
+                        ================================================= */}
+
+                        {showReprogramForm &&
+                            canReprogram && (
+                                <form
+                                    onSubmit={reprogramOrder}
+                                    className="mb-6 rounded-2xl border border-purple-200 bg-purple-50 p-5"
+                                >
+                                    <h3 className="font-bold text-purple-900">
+                                        Nueva reprogramación
+                                    </h3>
+
+                                    <p className="mt-1 text-sm text-purple-700">
+                                        La OT actual permanecerá en el
+                                        historial y se creará una nueva OT
+                                        relacionada.
+                                    </p>
+
+                                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+
+                                        <div>
+                                            <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                                Nueva fecha *
+                                            </label>
+
+                                            <input
+                                                type="date"
+                                                value={
+                                                    reprogramForm.scheduledDate
+                                                }
+                                                onChange={(event) =>
+                                                    setReprogramForm({
+                                                        ...reprogramForm,
+                                                        scheduledDate:
+                                                            event.target.value,
+                                                    })
+                                                }
+                                                className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-100"
+                                            />
+                                        </div>
+
+                                        <div>
+                                            <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                                Motivo *
+                                            </label>
+
+                                            <input
+                                                type="text"
+                                                value={
+                                                    reprogramForm.reason
+                                                }
+                                                onChange={(event) =>
+                                                    setReprogramForm({
+                                                        ...reprogramForm,
+                                                        reason:
+                                                            event.target.value,
+                                                    })
+                                                }
+                                                placeholder="Ej. Disponibilidad del proveedor"
+                                                className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-100"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="mt-4 flex justify-end">
+                                        <button
+                                            type="submit"
+                                            disabled={saving}
+                                            className="rounded-xl bg-purple-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            {saving
+                                                ? "Procesando..."
+                                                : "Crear reprogramación"}
+                                        </button>
+                                    </div>
+                                </form>
+                            )}
+
+                        {/* =================================================
+                            HISTORIAL DE REPROGRAMACIONES
+                        ================================================= */}
+
+                        <div className="mb-6">
+                            <h3 className="mb-3 font-bold text-gray-900">
+                                Historial de reprogramaciones
+                            </h3>
+
+                            {orderFamily.length === 0 ? (
+                                <div className="rounded-xl bg-gray-50 p-4 text-sm text-gray-500">
+                                    No hay historial disponible en las
+                                    órdenes cargadas.
+                                </div>
+                            ) : (
+                                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                                    <table className="w-full text-left text-sm">
+
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                                <th className="px-4 py-3">
+                                                    OT
+                                                </th>
+
+                                                <th className="px-4 py-3">
+                                                    Versión
+                                                </th>
+
+                                                <th className="px-4 py-3">
+                                                    Fecha
+                                                </th>
+
+                                                <th className="px-4 py-3">
+                                                    Estado
+                                                </th>
+
+                                                <th className="px-4 py-3">
+                                                    Motivo
+                                                </th>
+                                            </tr>
+                                        </thead>
+
+                                        <tbody className="divide-y">
+                                            {orderFamily.map(
+                                                (order) => (
+                                                    <tr
+                                                        key={order.id}
+                                                        className={
+                                                            order.id ===
+                                                                selectedOrder.id
+                                                                ? "bg-blue-50"
+                                                                : ""
+                                                        }
+                                                    >
+                                                        <td className="px-4 py-3 font-bold text-gray-900">
+                                                            {formatOrderNumber(
+                                                                order.order_number
+                                                            )}
+                                                        </td>
+
+                                                        <td className="px-4 py-3 text-gray-700">
+                                                            {order.reprogramming_number ===
+                                                                0
+                                                                ? "Original"
+                                                                : `Reprogramación ${order.reprogramming_number}`}
+                                                        </td>
+
+                                                        <td className="px-4 py-3 text-gray-700">
+                                                            {formatDate(
+                                                                order.scheduled_date
+                                                            )}
+                                                        </td>
+
+                                                        <td className="px-4 py-3">
+                                                            <span
+                                                                className={`rounded-full px-2 py-1 text-xs font-semibold ${getStatusClass(
+                                                                    order.status
+                                                                )}`}
+                                                            >
+                                                                {
+                                                                    statusLabels[
+                                                                    order.status
+                                                                    ]
+                                                                }
+                                                            </span>
+                                                        </td>
+
+                                                        <td className="px-4 py-3 text-gray-600">
+                                                            {order.reprogramming_reason ||
+                                                                "—"}
+                                                        </td>
+                                                    </tr>
+                                                )
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* =================================================
+                            VALIDACIONES DOCUMENTALES
+                        ================================================= */}
+
+                        <div>
+                            <div className="mb-4">
+                                <h3 className="font-bold text-gray-900">
+                                    Validaciones documentales
+                                </h3>
+
+                                <p className="mt-1 text-sm text-gray-500">
+                                    Estas validaciones son responsabilidad
+                                    del auxiliar.
+                                </p>
+                            </div>
+
+                            {loadingChecks ? (
+                                <div className="rounded-xl border border-gray-200 bg-gray-50 p-6 text-center">
+                                    <div className="mx-auto h-6 w-6 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600" />
+
+                                    <p className="mt-3 text-sm text-gray-500">
+                                        Cargando validaciones...
+                                    </p>
+                                </div>
+                            ) : selectedChecks.length === 0 ? (
+                                <div className="rounded-xl border border-gray-200 bg-gray-50 p-6 text-center text-sm text-gray-500">
+                                    Esta OT no tiene validaciones
+                                    documentales registradas.
+                                </div>
+                            ) : (
+                                <div className="grid gap-4 md:grid-cols-2">
+
+                                    {selectedChecks.map(
+                                        (check) => (
+                                            <div
+                                                key={check.id}
+                                                className={`rounded-2xl border p-5 ${getCheckClass(
+                                                    check.status
+                                                )}`}
+                                            >
+                                                <div>
+                                                    <h4 className="font-bold">
+                                                        {
+                                                            checkLabels[
+                                                            check.check_type
+                                                            ]
+                                                        }
+                                                    </h4>
+
+                                                    <p className="mt-1 text-xs opacity-70">
+                                                        Estado actual:{" "}
+                                                        {
+                                                            checkStatusLabels[
+                                                            check.status
+                                                            ]
+                                                        }
+                                                    </p>
+                                                </div>
+
+                                                <div className="mt-4 flex flex-wrap gap-2">
+
+                                                    <button
+                                                        type="button"
+                                                        disabled={
+                                                            !canValidate ||
+                                                            saving
+                                                        }
+                                                        onClick={() =>
+                                                            updateCheck(
+                                                                check,
+                                                                "cumple",
+                                                                check.observation ||
+                                                                ""
+                                                            )
+                                                        }
+                                                        className="rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-green-700 transition hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        ✓ Cumple
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        disabled={
+                                                            !canValidate ||
+                                                            saving
+                                                        }
+                                                        onClick={() => {
+                                                            const observation =
+                                                                window.prompt(
+                                                                    "Escribe la observación:",
+                                                                    check.observation ||
+                                                                    ""
+                                                                );
+
+                                                            if (
+                                                                observation !==
+                                                                null
+                                                            ) {
+                                                                updateCheck(
+                                                                    check,
+                                                                    "no_cumple",
+                                                                    observation
+                                                                );
+                                                            }
+                                                        }}
+                                                        className="rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        ✕ No cumple
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        disabled={
+                                                            !canValidate ||
+                                                            saving
+                                                        }
+                                                        onClick={() =>
+                                                            updateCheck(
+                                                                check,
+                                                                "pendiente",
+                                                                check.observation ||
+                                                                ""
+                                                            )
+                                                        }
+                                                        className="rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        ⏳ Pendiente
+                                                    </button>
+                                                </div>
+
+                                                {check.observation && (
+                                                    <div className="mt-4 rounded-lg bg-white/80 p-3 text-xs text-gray-700">
+                                                        <strong>
+                                                            Observación:
+                                                        </strong>{" "}
+                                                        {
+                                                            check.observation
+                                                        }
+                                                    </div>
+                                                )}
+
+                                                {check.validated_at && (
+                                                    <div className="mt-2 text-xs opacity-70">
+                                                        Validado el{" "}
+                                                        {new Date(
+                                                            check.validated_at
+                                                        ).toLocaleString(
+                                                            "es-CO"
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </section>
+                )}
+            </div>
+        </main>
+    );
+}

@@ -1,25 +1,101 @@
-import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { NextResponse } from "next/server";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { adminSession } from "@/lib/admin-api";
 
-const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+const ADMIN_ROLE = "administrador";
+
+export async function PATCH(request: Request) {
+    try {
+        const session = await adminSession();
+        if (session.response) return session.response;
+        const body = await request.json();
+        if (!body || typeof body.id !== "string" || typeof body.full_name !== "string" || !body.full_name.trim() || !["administrador", "auxiliar", "planeador"].includes(body.role) || typeof body.active !== "boolean") {
+            return NextResponse.json({ error: "Datos de perfil inválidos" }, { status: 400 });
+        }
+        if (body.id === session.user.id && (!body.active || body.role !== "administrador")) {
+            return NextResponse.json({ error: "No puedes desactivar tu propia cuenta ni quitarte el rol administrador." }, { status: 400 });
+        }
+        const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false, autoRefreshToken: false } });
+        const result = await admin.from("profiles").update({ full_name: body.full_name.trim(), role: body.role, active: body.active }).eq("id", body.id).select("id").single();
+        if (result.error) return NextResponse.json({ error: "No se pudo actualizar el perfil" }, { status: 400 });
+        return NextResponse.json({ success: true });
+    } catch { return NextResponse.json({ error: "Solicitud inválida o servicio no disponible" }, { status: 400 }); }
+}
 
 export async function POST(request: Request) {
     try {
-        const body = await request.json();
+        const supabase = await createServerSupabaseClient();
 
-        const { full_name, email, password, role } = body;
+        const {
+            data: { user },
+            error: userError,
+        } = await supabase.auth.getUser();
 
-        if (!full_name || !email || !password || !role) {
+        if (userError || !user) {
+            return NextResponse.json(
+                { error: "No autenticado." },
+                { status: 401 }
+            );
+        }
+
+        const { data: profile, error: profileError } = await supabase
+            .from("profiles")
+            .select("id, role, active")
+            .eq("id", user.id)
+            .single();
+
+        if (
+            profileError ||
+            !profile ||
+            !profile.active ||
+            profile.role !== ADMIN_ROLE
+        ) {
+            return NextResponse.json(
+                { error: "No tienes permiso para gestionar usuarios." },
+                { status: 403 }
+            );
+        }
+
+        let body: unknown;
+
+        try {
+            body = await request.json();
+        } catch {
+            return NextResponse.json(
+                { error: "El cuerpo de la solicitud no es válido." },
+                { status: 400 }
+            );
+        }
+
+        if (!body || typeof body !== "object") {
+            return NextResponse.json(
+                { error: "El cuerpo de la solicitud no es válido." },
+                { status: 400 }
+            );
+        }
+
+        const { full_name, email, password, role } = body as Record<
+            string,
+            unknown
+        >;
+
+        if (
+            typeof full_name !== "string" ||
+            typeof email !== "string" ||
+            typeof password !== "string" ||
+            typeof role !== "string" ||
+            !full_name.trim() ||
+            !email.trim() ||
+            !password
+        ) {
             return NextResponse.json(
                 { error: "Todos los campos son obligatorios." },
                 { status: 400 }
             );
         }
 
-        const allowedRoles = ["administrador", "ingeniero", "auxiliar"];
+        const allowedRoles = [ADMIN_ROLE, "planeador", "auxiliar"];
 
         if (!allowedRoles.includes(role)) {
             return NextResponse.json(
@@ -28,9 +104,16 @@ export async function POST(request: Request) {
             );
         }
 
+        // The service-role client is created only after the caller has been
+        // verified as an authenticated, active administrator.
+        const supabaseAdmin = createClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            process.env.SUPABASE_SERVICE_ROLE_KEY!
+        );
+
         const { data: authData, error: authError } =
             await supabaseAdmin.auth.admin.createUser({
-                email,
+                email: email.trim(),
                 password,
                 email_confirm: true,
             });
@@ -49,21 +132,21 @@ export async function POST(request: Request) {
             );
         }
 
-        const { error: profileError } = await supabaseAdmin
+        const { error: profileInsertError } = await supabaseAdmin
             .from("profiles")
             .insert({
                 id: authData.user.id,
-                full_name,
-                email,
+                full_name: full_name.trim(),
+                email: email.trim(),
                 role,
                 active: true,
             });
 
-        if (profileError) {
+        if (profileInsertError) {
             await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
 
             return NextResponse.json(
-                { error: profileError.message },
+                { error: profileInsertError.message },
                 { status: 400 }
             );
         }

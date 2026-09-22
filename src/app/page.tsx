@@ -2,8 +2,10 @@
 
 import { FormEvent, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useRouter } from "next/navigation";
 
 export default function Home() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -11,6 +13,7 @@ export default function Home() {
 
   const handleLogin = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (loading) return;
 
     setLoading(true);
     setError("");
@@ -26,7 +29,8 @@ export default function Home() {
       return;
     }
 
-    window.location.href = "/dashboard";
+    router.replace("/dashboard");
+    router.refresh();
   };
 
   return (

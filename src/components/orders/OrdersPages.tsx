@@ -81,12 +81,27 @@ const labels: Record<string, string> = {
   no_cumple: "No cumple",
 };
 const orderPath = (id: number) => `/dashboard/ordenes/${id}`;
+const orderDetailPath = (id: number, from?: string, search?: string) => {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (search) params.set("search", search);
+  const query = params.toString();
+  return `${orderPath(id)}${query ? `?${query}` : ""}`;
+};
 const formatNumber = (number: number) =>
   `OT-${String(number).padStart(6, "0")}`;
 const formatDate = (date: string) =>
   date ? date.split("-").reverse().join("/") : "-";
 const normalizeAviso = (subject: string) => `AVISO ${subject.trim().replace(/\s+/g, " ")}`;
 const validAviso = (subject: string) => /[\p{L}\p{N}]/u.test(subject);
+function BackLink({ href }: { href: string }) {
+  return (
+    <Link href={href} className="app-button-secondary min-h-10 w-fit max-w-full cursor-pointer gap-2 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400">
+      <AppIcon name="arrow" className="h-4 w-4 rotate-180" aria-hidden="true" />
+      Volver
+    </Link>
+  );
+}
 const emptyCreateOrderForm = {
   siteId: "",
   type: "preventivo",
@@ -181,16 +196,16 @@ function useBucketOrders(slug: BucketSlug, limit: number) {
   );
 }
 
-type SearchBundle = { orders: Order[]; roots: Order[] };
+type SearchBundle = { orders: Order[]; familyOrders: Order[] };
 function useSearchOrders(slug: BucketSlug, term: string) {
   const { version } = useDashboardData();
   const key = `orders:search:${slug}:${term.toLocaleLowerCase("es-CO")}`;
   return useCachedQuery<SearchBundle>(
     key,
     async () => {
-      if (!term) return { orders: [], roots: [] };
+      if (!term) return { orders: [], familyOrders: [] };
       const matches = await supabase.rpc("search_maintenance_orders_v2", {
-        p_query: term,
+        p_query: term.trim(),
         p_bucket: slug,
       });
       if (matches.error) throw matches.error;
@@ -208,18 +223,22 @@ function useSearchOrders(slug: BucketSlug, term: string) {
         ...order,
         aviso_match: matchById.get(order.id) || false,
       })).sort((a, b) => b.id - a.id);
-      const presentIds = new Set(orders.map((order) => order.id));
-      const missingRoots = [...new Set(orders.filter((order) => order.aviso_match)
-        .map((order) => order.root_order_id || order.id))]
-        .filter((rootId) => !presentIds.has(rootId));
-      const roots: Order[] = [];
-      for (let offset = 0; offset < missingRoots.length; offset += 200) {
-        const result = await supabase.from("maintenance_orders")
-          .select(orderSelect).in("id", missingRoots.slice(offset, offset + 200));
-        if (result.error) throw result.error;
-        roots.push(...((result.data || []) as unknown as Order[]));
+      const rootIds = [...new Set(orders.filter((order) => order.aviso_match)
+        .map((order) => order.root_order_id || order.id))];
+      const familyById = new Map<number, Order>();
+      for (let offset = 0; offset < rootIds.length; offset += 100) {
+        const ids = rootIds.slice(offset, offset + 100);
+        const [roots, descendants] = await Promise.all([
+          supabase.from("maintenance_orders").select(orderSelect).in("id", ids),
+          supabase.from("maintenance_orders").select(orderSelect).in("root_order_id", ids),
+        ]);
+        if (roots.error) throw roots.error;
+        if (descendants.error) throw descendants.error;
+        for (const member of [...(roots.data || []), ...(descendants.data || [])] as unknown as Order[]) {
+          familyById.set(member.id, member);
+        }
       }
-      return { orders, roots };
+      return { orders, familyOrders: [...familyById.values()] };
     },
     [slug, term, version(key)],
   );
@@ -245,7 +264,7 @@ function Status({ status }: { status: Order["status"] }) {
   return <StatusBadge status={status} />;
 }
 
-function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
+function OrderTable({ orders, from, search }: { orders: Order[]; from?: string; search?: string }) {
   if (!orders.length)
     return (
       <p className="app-card p-8 text-center text-sm text-slate-500">
@@ -290,7 +309,7 @@ function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
               <td className="p-3">
                 <Link
                   className="font-semibold text-blue-300 transition hover:text-blue-200 hover:underline"
-                  href={`${orderPath(order.id)}${from ? `?from=${from}` : ""}`}
+                  href={orderDetailPath(order.id, from, search)}
                 >
                   Ver orden
                 </Link>
@@ -303,7 +322,41 @@ function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
   );
 }
 
-function OrderSearchResults({ bundle, from }: { bundle: SearchBundle; from: BucketSlug }) {
+function currentFamilyOrder(members: Order[]) {
+  const parentIds = new Set(members.map((item) => item.parent_order_id).filter((id): id is number => id !== null));
+  return [...members].filter((item) => !parentIds.has(item.id))
+    .sort((a, b) => b.reprogramming_number - a.reprogramming_number || b.id - a.id)[0] || null;
+}
+
+function OrderChainRow({ order, currentId, from, search, selected = false, inBucket = true }: {
+  order: Order;
+  currentId: number | null;
+  from?: string;
+  search?: string;
+  selected?: boolean;
+  inBucket?: boolean;
+}) {
+  return (
+    <div className={`relative flex flex-wrap items-center justify-between gap-3 border-l border-blue-400/20 py-4 pl-7 pr-4 text-sm before:absolute before:-left-[6px] before:top-6 before:h-3 before:w-3 before:rounded-full before:border-2 before:border-blue-300 before:bg-[#0d1928] ${selected ? "bg-blue-500/7" : ""}`}>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="font-semibold text-slate-100">{formatNumber(order.order_number)}</p>
+          <span className="text-xs text-slate-400">{order.parent_order_id ? `Reprogramación ${order.reprogramming_number}` : "Orden original"}</span>
+          {order.id === currentId && <span className="rounded-full border border-cyan-400/25 bg-cyan-500/10 px-2 py-0.5 text-[11px] font-semibold text-cyan-200">Programación actual</span>}
+          {selected && <span className="text-[11px] font-semibold text-blue-300">Estás aquí</span>}
+        </div>
+        <p className="mt-1 text-xs text-slate-400">{formatDate(order.scheduled_date)} · {order.scheduled_time?.slice(0, 5) || "Sin hora"} · {order.sites?.name || "Sede sin nombre"}</p>
+        {!inBucket && <p className="mt-1 text-xs text-slate-500">Fuera de esta bandeja</p>}
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <Status status={order.status} />
+        <Link href={orderDetailPath(order.id, from, search)} aria-label={`Ver ${formatNumber(order.order_number)}`} className="font-semibold text-blue-300 hover:underline">Ver orden</Link>
+      </div>
+    </div>
+  );
+}
+
+function OrderSearchResults({ bundle, from, search }: { bundle: SearchBundle; from: BucketSlug; search: string }) {
   const [expanded, setExpanded] = useState<number[]>([]);
   const groups = new Map<number, Order[]>();
   const standalone: Order[] = [];
@@ -315,55 +368,50 @@ function OrderSearchResults({ bundle, from }: { bundle: SearchBundle; from: Buck
     const rootId = order.root_order_id || order.id;
     groups.set(rootId, [...(groups.get(rootId) || []), order]);
   }
+  const matchedIds = new Set(bundle.orders.map((item) => item.id));
   if (!bundle.orders.length) return <OrderTable orders={[]} from={from} />;
   return (
     <div className="space-y-4">
-      {[...groups.entries()].map(([rootId, members]) => {
-        const root = members.find((item) => item.id === rootId)
-          || bundle.roots.find((item) => item.id === rootId);
-        const children = members.filter((item) => item.id !== rootId)
+      {[...groups.entries()].map(([rootId, matched]) => {
+        const family = bundle.familyOrders.filter((item) => (item.root_order_id || item.id) === rootId)
           .sort((a, b) => a.reprogramming_number - b.reprogramming_number || a.id - b.id);
+        const members = family.length ? family : matched;
+        const current = currentFamilyOrder(members);
+        const [first, ...remaining] = members;
         const isExpanded = expanded.includes(rootId);
         return (
           <section key={rootId} className="app-card overflow-hidden">
-            <div className="flex items-center gap-3 border-b border-blue-400/15 bg-blue-500/8 px-4 py-4">
+            <div className="flex flex-wrap items-center gap-3 border-b border-blue-400/15 bg-blue-500/8 px-4 py-4">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-500/15 text-blue-300"><AppIcon name="document" className="h-5 w-5" /></span>
               <div className="min-w-0 flex-1">
-                <p className="text-[11px] font-semibold uppercase tracking-[.14em] text-blue-300">Familia AVISO</p>
-                <h2 className="mt-0.5 truncate font-semibold text-slate-900" title={root?.aviso || members[0]?.aviso || "Sin aviso"}>{root?.aviso || members[0]?.aviso || "Sin aviso"}</h2>
+                <p className="text-[11px] font-semibold uppercase tracking-[.14em] text-blue-300">Cadena de reprogramaciones</p>
+                <h2 className="mt-0.5 break-words font-semibold text-slate-100">{members[0]?.aviso || "Sin aviso"}</h2>
+                {current && (
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <p className="text-xs text-slate-400">Programación actual: <span className="font-semibold text-slate-100">{formatNumber(current.order_number)}</span></p>
+                    <Link
+                      href={orderDetailPath(current.id, from, search)}
+                      aria-label={`Ver programación actual ${formatNumber(current.order_number)}`}
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-blue-400/25 bg-blue-500/10 px-3 py-1.5 text-xs font-semibold text-blue-200 transition-colors hover:border-blue-300/50 hover:bg-blue-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400"
+                    >
+                      Ver actual <AppIcon name="arrow" className="h-3.5 w-3.5" aria-hidden="true" />
+                    </Link>
+                  </div>
+                )}
               </div>
               <span className="rounded-full border border-blue-400/20 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-200">{members.length} OT</span>
             </div>
-            {root && (
-              <div className="relative flex flex-wrap items-center justify-between gap-3 px-4 py-4 pl-10 before:absolute before:left-[19px] before:top-0 before:h-full before:w-px before:bg-blue-400/20 after:absolute after:left-[14px] after:top-6 after:h-3 after:w-3 after:rounded-full after:border-2 after:border-blue-300 after:bg-[#0d1928]">
-                <div>
-                  <p className="font-semibold text-slate-900">{formatNumber(root.order_number)} <span className="ml-2 text-xs font-normal text-slate-500">Orden original</span></p>
-                  <p className="mt-0.5 text-xs text-slate-500">{formatDate(root.scheduled_date)}{root.scheduled_time ? ` · ${root.scheduled_time.slice(0, 5)}` : ""} · {root.sites?.name || "Sede sin nombre"}{!members.some((item) => item.id === rootId) ? " · Fuera de esta bandeja" : ""}</p>
-                </div>
-                <div className="flex items-center gap-3"><Status status={root.status} /><Link href={`${orderPath(root.id)}?from=${from}`} className="text-sm font-semibold text-blue-300 hover:underline">Ver detalle</Link></div>
-              </div>
-            )}
-            {children.length > 0 && (
-              <>
-                <button type="button" aria-expanded={isExpanded} onClick={() => setExpanded((current) => isExpanded ? current.filter((id) => id !== rootId) : [...current, rootId])} className="flex w-full items-center gap-2 border-t border-slate-100 px-4 py-3 text-left text-sm font-semibold text-blue-300 hover:bg-slate-50">
-                  <AppIcon name="chevron" className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`} /> Ver reprogramaciones ({children.length})
-                </button>
-                {isExpanded && (
-                  <div className="app-reveal divide-y divide-slate-100 border-t border-slate-100 bg-slate-950/25">
-                    {children.map((child) => (
-                      <div key={child.id} className="relative flex flex-wrap items-center justify-between gap-2 px-4 py-3 pl-10 text-sm before:absolute before:left-[19px] before:top-0 before:h-full before:w-px before:bg-blue-400/20 after:absolute after:left-[14px] after:top-5 after:h-3 after:w-3 after:rounded-full after:border-2 after:border-violet-300 after:bg-[#0d1928]">
-                        <div><p className="font-semibold text-slate-800">{formatNumber(child.order_number)} <span className="font-normal text-slate-500">Reprogramación {child.reprogramming_number}</span></p><p className="text-xs text-slate-500">{formatDate(child.scheduled_date)}{child.scheduled_time ? ` · ${child.scheduled_time.slice(0, 5)}` : ""} · {child.sites?.name || "Sede sin nombre"}</p></div>
-                        <div className="flex items-center gap-3"><Status status={child.status} /><Link href={`${orderPath(child.id)}?from=${from}`} className="font-semibold text-blue-300 hover:underline">Ver detalle</Link></div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
+            <div className="px-5">{first && <OrderChainRow order={first} currentId={current?.id || null} from={from} search={search} inBucket={matchedIds.has(first.id)} />}</div>
+            {remaining.length > 0 && <>
+              <button type="button" aria-expanded={isExpanded} onClick={() => setExpanded((currentIds) => isExpanded ? currentIds.filter((id) => id !== rootId) : [...currentIds, rootId])} className="flex w-full items-center gap-2 border-t border-slate-100 px-4 py-3 text-left text-sm font-semibold text-blue-300 hover:bg-slate-50">
+                <AppIcon name="chevron" className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`} /> Ver reprogramaciones ({remaining.length})
+              </button>
+              {isExpanded && <div className="app-reveal divide-y divide-slate-100 border-t border-slate-100 bg-slate-950/25 px-5">{remaining.map((member) => <OrderChainRow key={member.id} order={member} currentId={current?.id || null} from={from} search={search} inBucket={matchedIds.has(member.id)} />)}</div>}
+            </>}
           </section>
         );
       })}
-      {standalone.length > 0 && <OrderTable orders={standalone} from={from} />}
+      {standalone.length > 0 && <OrderTable orders={standalone} from={from} search={search} />}
     </div>
   );
 }
@@ -649,12 +697,7 @@ export function OrdersOverview() {
     <main className="app-page mx-auto max-w-7xl space-y-7 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-        <Link
-          href="/dashboard"
-          className="text-sm font-semibold text-blue-300 hover:text-blue-200"
-        >
-          ← Inicio
-        </Link>
+        <BackLink href="/dashboard" />
         <h1 className="mt-4 text-3xl font-bold tracking-tight">Órdenes de mantenimiento</h1>
         <p className="mt-1 text-sm text-slate-500">
           Organiza el trabajo por estado y abre la bandeja que necesitas.
@@ -696,10 +739,12 @@ export function OrdersOverview() {
 
 export function OrdersBucket({ slug }: { slug: BucketSlug }) {
   const { profile } = useDashboardData();
+  const searchParams = useSearchParams();
+  const initialSearch = searchParams.get("search") || "";
   const [limit, setLimit] = useState(100);
   const { data: orders, loading, error } = useBucketOrders(slug, limit);
-  const [search, setSearch] = useState("");
-  const [searchTerm, setSearchTerm] = useState("");
+  const [search, setSearch] = useState(initialSearch);
+  const [searchTerm, setSearchTerm] = useState(initialSearch.trim());
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearchTerm(search.trim()), 250);
     return () => window.clearTimeout(timeout);
@@ -711,18 +756,13 @@ export function OrdersBucket({ slug }: { slug: BucketSlug }) {
   if (slug === "eliminadas" && profile.role !== "administrador")
     return (
       <main className="p-6">
-        <Link href="/dashboard">← Volver al inicio</Link>
+        <BackLink href="/dashboard" />
         <p className="mt-6">No tienes permiso para ver órdenes eliminadas.</p>
       </main>
     );
   return (
     <main className="app-page mx-auto max-w-7xl space-y-6 p-4 md:p-8">
-      <Link
-        href="/dashboard"
-        className="text-sm font-semibold text-blue-300 hover:text-blue-200"
-      >
-        ← Volver al inicio
-      </Link>
+      <BackLink href="/dashboard" />
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
         <p className="text-xs font-semibold uppercase tracking-[.15em] text-blue-300">Órdenes de mantenimiento</p>
@@ -749,7 +789,7 @@ export function OrdersBucket({ slug }: { slug: BucketSlug }) {
       ) : waitingForSearch || !searchResults ? (
         <div className="app-card h-48 animate-pulse" />
       ) : (
-        <OrderSearchResults key={`${slug}:${searchTerm}`} bundle={searchResults} from={slug} />
+        <OrderSearchResults key={`${slug}:${searchTerm}`} bundle={searchResults} from={slug} search={searchTerm} />
       ) : error ? (
         <p className="text-red-700">{error}</p>
       ) : loading && !orders ? (
@@ -771,9 +811,15 @@ export function OrdersBucket({ slug }: { slug: BucketSlug }) {
 export function OrderDetail({ id }: { id: number }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const from = searchParams.get("from");
+  const searchOrigin = searchParams.get("search")?.trim() || "";
+  const validFrom = from && from in buckets ? from : undefined;
+  const returnHref = validFrom
+    ? `/dashboard/ordenes/${validFrom}${searchOrigin ? `?search=${encodeURIComponent(searchOrigin)}` : ""}`
+    : "/dashboard";
   const { profile, changeOrder, invalidate } = useDashboardData();
   const { data: order, loading, error } = useOrder(id);
-  const { data: history = [] } = useCachedQuery<Order[]>(
+  const { data: history = [], loading: historyLoading, error: historyError } = useCachedQuery<Order[]>(
     `orders:history:${id}`,
     async () => {
       const current = await supabase
@@ -842,7 +888,7 @@ export function OrderDetail({ id }: { id: number }) {
         : slug === "eliminadas"
           ? Boolean(nextOrder.deleted_at)
           : !nextOrder.deleted_at && nextOrder.status === config.status;
-    if (!stillBelongs) router.replace(`/dashboard/ordenes/${slug}`);
+    if (!stillBelongs) router.replace(returnHref);
   };
   const run = async ({ context, successMessage, request, patch }: {
     context: string;
@@ -1011,9 +1057,7 @@ export function OrderDetail({ id }: { id: number }) {
   if (error || !order)
     return (
       <main className="p-6">
-        <button onClick={() => router.back()} className="font-semibold">
-          ← Volver
-        </button>
+        <BackLink href={returnHref} />
         <p className="mt-6 text-red-700">
           {error || "La orden no está disponible."}
         </p>
@@ -1025,6 +1069,7 @@ export function OrderDetail({ id }: { id: number }) {
     order.approval_status === "pendiente";
   const canStart =
     canManage &&
+    !order.deleted_at &&
     order.status === "programada" &&
     order.approval_status === "aprobada";
   const canComplete =
@@ -1037,13 +1082,9 @@ export function OrderDetail({ id }: { id: number }) {
     ["pendiente", "programada", "en_ejecucion"].includes(order.status) &&
     Boolean(order.aviso);
   const rootOrder = history.find((item) => item.id === order.root_order_id);
-  const from = searchParams.get("from");
-  const returnHref =
-    from && from in buckets ? `/dashboard/ordenes/${from}` : "/dashboard";
-  const returnLabel =
-    from && from in buckets
-      ? `Volver a ${buckets[from as BucketSlug].title.replace("Órdenes ", "")}`
-      : "Volver al inicio";
+  const previousOrder = history.find((item) => item.id === order.parent_order_id);
+  const childOrder = history.find((item) => item.parent_order_id === order.id);
+  const currentOrder = currentFamilyOrder(history);
   const requiredChecks = order.requires_coproperty ? 4 : 3;
   const completeChecks = applicable.filter(
     (check) => check.status === "cumple",
@@ -1053,20 +1094,17 @@ export function OrderDetail({ id }: { id: number }) {
     order.status === "pendiente"
       ? "Esta orden está esperando la validación de la documentación."
       : order.status === "programada"
-        ? "Documentación aprobada. La orden está lista para iniciar gestión."
+        ? "Documentación aprobada. La orden está lista para iniciar el trabajo."
         : order.status === "en_ejecucion"
           ? "La orden se encuentra actualmente en ejecución."
           : order.status === "completada"
-            ? "Esta orden fue completada."
-            : "Esta orden no tiene acciones operativas disponibles.";
+          ? "Esta orden fue completada."
+            : order.status === "reprogramada"
+              ? "Esta orden fue reprogramada. Consulta la programación actual en la nueva OT."
+              : "Esta orden no tiene acciones operativas disponibles.";
   return (
     <main className="app-page mx-auto max-w-6xl space-y-6 p-4 md:p-8">
-      <Link
-        href={returnHref}
-        className="text-sm font-semibold text-blue-300 hover:text-blue-200"
-      >
-        ← {returnLabel}
-      </Link>
+      <BackLink href={returnHref} />
       {message && (
         <p className="rounded-xl border border-green-200 bg-green-50 p-3 text-green-700">
           {message}
@@ -1097,6 +1135,33 @@ export function OrderDetail({ id }: { id: number }) {
         {order.parent_order_id && <p className="mt-4 text-xs text-slate-300">Reprogramación {order.reprogramming_number} de la familia iniciada en {rootOrder ? formatNumber(rootOrder.order_number) : "la orden original"}</p>}
         </div>
       </header>
+      {(childOrder || order.status === "reprogramada") && (
+        <section className="app-card border-violet-400/20 p-5 sm:p-6" aria-label="Orden reprogramada">
+          <div className="flex flex-wrap items-start gap-4">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-500/15 text-violet-200"><AppIcon name="refresh" className="h-5 w-5" /></span>
+            <div className="min-w-0 flex-1">
+              <h2 className="text-lg font-semibold">Esta orden fue reprogramada</h2>
+              {currentOrder && <p className="mt-1 text-sm text-slate-300">La programación actual continúa en <strong className="text-cyan-200">{formatNumber(currentOrder.order_number)}</strong>.</p>}
+              {childOrder ? <>
+                <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                  <p><span className="block text-xs text-slate-500">Nueva orden</span><span className="font-semibold">{formatNumber(childOrder.order_number)}</span></p>
+                  <p><span className="block text-xs text-slate-500">Estado</span><Status status={childOrder.status} /></p>
+                  <p><span className="block text-xs text-slate-500">Fecha y hora</span>{formatDate(childOrder.scheduled_date)} · {childOrder.scheduled_time?.slice(0, 5) || "Sin hora"}</p>
+                  <p><span className="block text-xs text-slate-500">Sede</span>{childOrder.sites?.name || "Sede sin nombre"}</p>
+                  <p className="min-w-0 sm:col-span-2"><span className="block text-xs text-slate-500">AVISO</span><span className="break-words">{childOrder.aviso || "Sin aviso"}</span></p>
+                </div>
+                <Link href={orderDetailPath((currentOrder || childOrder).id, validFrom, searchOrigin)} className="app-button-primary mt-5 min-h-10 px-4 py-2 text-sm">Ver orden actual <AppIcon name="arrow" className="h-4 w-4" /></Link>
+              </> : <p className="mt-3 text-sm text-slate-400">{historyLoading ? "Cargando la nueva programación…" : historyError || "No se pudo identificar la nueva orden en el historial."}</p>}
+            </div>
+          </div>
+        </section>
+      )}
+      {order.parent_order_id && (
+        <section className="app-card-soft flex flex-wrap items-center justify-between gap-4 p-5 sm:p-6" aria-label="Orden anterior">
+          <div><h2 className="font-semibold">Esta orden proviene de una reprogramación</h2><p className="mt-1 text-sm text-slate-400">Orden anterior: {previousOrder ? formatNumber(previousOrder.order_number) : historyLoading ? "Cargando…" : "No disponible"}</p></div>
+          {previousOrder && <Link href={orderDetailPath(previousOrder.id, validFrom, searchOrigin)} className="app-button-secondary min-h-10 px-4 py-2 text-sm"><AppIcon name="arrow" className="h-4 w-4 rotate-180" /> Ver orden anterior</Link>}
+        </section>
+      )}
       <section className="grid gap-5 lg:grid-cols-[1.4fr_0.8fr]">
         <div className="app-card p-5 sm:p-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">
@@ -1192,7 +1257,7 @@ export function OrderDetail({ id }: { id: number }) {
               }
               className="app-button-primary mt-4 min-h-11 px-4 py-2 text-sm"
             >
-              Iniciar gestión
+              Iniciar orden
             </button>
           )}
           {canComplete && (
@@ -1404,9 +1469,14 @@ export function OrderDetail({ id }: { id: number }) {
       </section>
       <section className="app-card p-5 sm:p-6">
         <h2 className="text-lg font-bold">Historial de reprogramaciones</h2>
-        {history.length > 1 ? (
-          <div className="mt-4">
-            <OrderTable orders={history} from={from || undefined} />
+        {historyLoading && !history.length ? (
+          <p className="mt-3 text-sm text-slate-400">Cargando historial…</p>
+        ) : historyError ? (
+          <p role="alert" className="mt-3 text-sm text-red-300">{historyError}</p>
+        ) : history.length > 1 ? (
+          <div className="mt-4 pl-3">
+            {[...history].sort((a, b) => a.reprogramming_number - b.reprogramming_number || a.id - b.id)
+              .map((member) => <OrderChainRow key={member.id} order={member} currentId={currentOrder?.id || null} from={validFrom} search={searchOrigin} selected={member.id === order.id} />)}
           </div>
         ) : (
           <p className="mt-2 text-sm text-slate-500">

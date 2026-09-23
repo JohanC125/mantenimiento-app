@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { useDashboardData } from "@/components/dashboard/DashboardDataProvider";
 import { CreateOrderForm } from "@/components/orders/OrdersPages";
@@ -84,7 +85,9 @@ function getRoleLabel(role: Role | null) {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const { profile, read, fetch } = useDashboardData();
+  const [orderSearch, setOrderSearch] = useState("");
   const cached = read<DashboardSummary>("dashboard:summary");
   const [hasInitialCache] = useState(Boolean(cached));
   const [loading, setLoading] = useState(!cached);
@@ -251,6 +254,28 @@ export default function DashboardPage() {
           </div>
           <div aria-hidden className="pointer-events-none absolute -right-14 -top-16 h-64 w-64 rounded-full bg-blue-500/10 blur-3xl" />
         </section>
+
+        <form
+          role="search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const query = orderSearch.trim();
+            if (query) router.push(`/dashboard/ordenes/todas?search=${encodeURIComponent(query)}`);
+          }}
+          className="app-card flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:p-5"
+        >
+          <AppIcon name="search" className="hidden h-5 w-5 shrink-0 text-blue-300 sm:block" />
+          <label htmlFor="dashboard-order-search" className="sr-only">Buscar órdenes por OT o AVISO</label>
+          <input
+            id="dashboard-order-search"
+            type="search"
+            value={orderSearch}
+            onChange={(event) => setOrderSearch(event.target.value)}
+            placeholder="Buscar por OT o AVISO..."
+            className="app-field min-w-0 flex-1 px-4 py-2 sm:border-0 sm:bg-transparent sm:shadow-none"
+          />
+          <button type="submit" disabled={!orderSearch.trim()} className="app-button-primary min-h-11 px-5 text-sm">Buscar</button>
+        </form>
 
         {/* Resumen de órdenes */}
         <section>

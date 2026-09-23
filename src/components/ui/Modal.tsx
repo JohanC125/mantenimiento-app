@@ -1,25 +1,52 @@
 "use client";
 
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { AppIcon } from "@/components/ui/AppIcon";
 
 export function Modal({
   title,
   description,
+  icon,
+  closeDisabled = false,
   children,
   onClose,
 }: {
   title: string;
   description?: string;
-  children: React.ReactNode;
+  icon?: ReactNode;
+  closeDisabled?: boolean;
+  children: ReactNode;
   onClose: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
+  const closeDisabledRef = useRef(closeDisabled);
+  const closingRef = useRef(false);
+  const timerRef = useRef<number | null>(null);
+  const [closing, setClosing] = useState(false);
   const titleId = useId();
 
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
+
+  useEffect(() => {
+    closeDisabledRef.current = closeDisabled;
+  }, [closeDisabled]);
+
+  const requestClose = () => {
+    if (closeDisabledRef.current || closingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    timerRef.current = window.setTimeout(() => {
+      if (closeDisabledRef.current) {
+        closingRef.current = false;
+        setClosing(false);
+        return;
+      }
+      onCloseRef.current();
+    }, 180);
+  };
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -28,7 +55,7 @@ export function Modal({
     dialogRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onCloseRef.current();
+        requestClose();
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
@@ -56,13 +83,15 @@ export function Modal({
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       previouslyFocused?.focus();
     };
   }, []);
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end bg-slate-950/45 p-0 sm:items-center sm:justify-center sm:p-6"
-      onMouseDown={onClose}
+      className="app-modal-backdrop fixed inset-0 z-50 flex items-end p-0 sm:items-center sm:justify-center sm:p-6"
+      data-closing={closing}
+      onMouseDown={requestClose}
     >
       <div
         ref={dialogRef}
@@ -71,24 +100,28 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId}
         onMouseDown={(event) => event.stopPropagation()}
-        className="max-h-[calc(100dvh-1rem)] w-full overflow-y-auto rounded-t-3xl bg-white shadow-2xl outline-none sm:max-h-[calc(100dvh-3rem)] sm:max-w-2xl sm:rounded-2xl"
+        className="app-modal-panel max-h-[calc(100dvh-1rem)] w-full overflow-y-auto rounded-t-3xl outline-none sm:max-h-[calc(100dvh-3rem)] sm:max-w-2xl sm:rounded-2xl"
+        data-closing={closing}
       >
-        <div className="flex items-start justify-between gap-4 border-b px-5 py-5 sm:px-6">
-          <div>
-            <h2 id={titleId} className="text-lg font-bold text-slate-900">
+        <div className="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-5 sm:px-6">
+          <div className="flex min-w-0 items-start gap-3">
+            {icon && <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-400/20 bg-blue-500/12 text-blue-300">{icon}</span>}
+            <div><h2 id={titleId} className="text-lg font-bold text-slate-50">
               {title}
             </h2>
             {description && (
-              <p className="mt-1 text-sm text-slate-500">{description}</p>
+              <p className="mt-1 text-sm text-slate-400">{description}</p>
             )}
+            </div>
           </div>
           <button
             type="button"
-            onClick={onClose}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-2xl text-slate-500 hover:bg-slate-100"
+            onClick={requestClose}
+            disabled={closeDisabled || closing}
+            className="app-button-secondary h-10 w-10 shrink-0 text-slate-400"
             aria-label="Cerrar"
           >
-            ×
+            <AppIcon name="close" className="h-5 w-5" />
           </button>
         </div>
         {children}

@@ -1,16 +1,16 @@
 const orderStyles: Record<string, string> = {
-  pendiente: "border-amber-200 bg-amber-50 text-amber-800",
-  programada: "border-blue-200 bg-blue-50 text-blue-800",
-  en_ejecucion: "border-indigo-200 bg-indigo-50 text-indigo-800",
-  completada: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  reprogramada: "border-orange-200 bg-orange-50 text-orange-800",
-  cancelada: "border-red-200 bg-red-50 text-red-800",
+  pendiente: "border-amber-400/25 bg-amber-500/12 text-amber-200",
+  programada: "border-blue-400/25 bg-blue-500/12 text-blue-200",
+  en_ejecucion: "border-cyan-400/25 bg-cyan-500/12 text-cyan-200",
+  completada: "border-emerald-400/25 bg-emerald-500/12 text-emerald-200",
+  reprogramada: "border-violet-400/25 bg-violet-500/12 text-violet-200",
+  cancelada: "border-red-400/25 bg-red-500/12 text-red-200",
 };
 
 const documentStyles: Record<string, string> = {
-  pendiente: "border-amber-200 bg-amber-50 text-amber-800",
-  cumple: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  no_cumple: "border-red-200 bg-red-50 text-red-800",
+  pendiente: "border-amber-400/25 bg-amber-500/12 text-amber-200",
+  cumple: "border-emerald-400/25 bg-emerald-500/12 text-emerald-200",
+  no_cumple: "border-red-400/25 bg-red-500/12 text-red-200",
 };
 
 const labels: Record<string, string> = {
@@ -21,5 +21,5 @@ const labels: Record<string, string> = {
 
 export function StatusBadge({ status, kind = "order" }: { status: string; kind?: "order" | "document" }) {
   const styles = kind === "document" ? documentStyles : orderStyles;
-  return <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-bold uppercase tracking-wide ${styles[status] || "border-slate-200 bg-slate-50 text-slate-700"}`}>{labels[status] || status}</span>;
+  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition-colors ${styles[status] || "border-white/10 bg-white/5 text-slate-300"}`}><span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />{labels[status] || status}</span>;
 }

@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Gestión de Mantenimiento",
-  description: "Aplicación Web de Gestión de Órdenes de Mantenimiento",
+  title: "OT Mantenimiento",
+  description: "Gestión de órdenes de mantenimiento",
 };
 
 export default function RootLayout({

@@ -10,17 +10,95 @@ export async function PATCH(request: Request) {
         const session = await adminSession();
         if (session.response) return session.response;
         const body = await request.json();
-        if (!body || typeof body.id !== "string" || typeof body.full_name !== "string" || !body.full_name.trim() || !["administrador", "auxiliar", "planeador"].includes(body.role) || typeof body.active !== "boolean") {
+        if (!body || typeof body !== "object" || typeof body.id !== "string") {
             return NextResponse.json({ error: "Datos de perfil inválidos" }, { status: 400 });
         }
-        if (body.id === session.user.id && (!body.active || body.role !== "administrador")) {
-            return NextResponse.json({ error: "No puedes desactivar tu propia cuenta ni quitarte el rol administrador." }, { status: 400 });
-        }
         const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false, autoRefreshToken: false } });
-        const result = await admin.from("profiles").update({ full_name: body.full_name.trim(), role: body.role, active: body.active }).eq("id", body.id).select("id").single();
+
+        if (body.action === "set_active") {
+            if (typeof body.active !== "boolean" || typeof body.expected_active !== "boolean" || body.active === body.expected_active) {
+                return NextResponse.json({ error: "Cambio de estado inválido" }, { status: 400 });
+            }
+            if (body.id === session.user.id) {
+                return NextResponse.json({ error: "No puedes cambiar el estado de tu propia cuenta." }, { status: 403 });
+            }
+            const result = await admin.from("profiles")
+                .update({ active: body.active })
+                .eq("id", body.id)
+                .eq("active", body.expected_active)
+                .is("deleted_at", null)
+                .select("id, active")
+                .maybeSingle();
+            if (result.error) return NextResponse.json({ error: "No se pudo cambiar el estado del usuario." }, { status: 400 });
+            if (!result.data) return NextResponse.json({ error: "El estado del usuario cambió. Actualiza la lista antes de reintentar." }, { status: 409 });
+            return NextResponse.json({ user: result.data });
+        }
+
+        if (body.action === "restore_user") {
+            if (body.id === session.user.id) {
+                return NextResponse.json({ error: "No puedes restaurar tu propia cuenta." }, { status: 403 });
+            }
+            const { data: authUser, error: authError } = await admin.auth.admin.getUserById(body.id);
+            if (authError || !authUser.user) {
+                return NextResponse.json({ error: "La cuenta de Auth no está disponible para restauración." }, { status: 409 });
+            }
+            const result = await admin.from("profiles")
+                .update({ active: true, deleted_at: null, deleted_by: null })
+                .eq("id", body.id)
+                .not("deleted_at", "is", null)
+                .select("id, active, deleted_at")
+                .maybeSingle();
+            if (result.error) return NextResponse.json({ error: "No se pudo restaurar el usuario." }, { status: 400 });
+            if (!result.data) return NextResponse.json({ error: "El usuario ya no figura como eliminado." }, { status: 409 });
+            return NextResponse.json({ user: result.data });
+        }
+
+        if ("active" in body || typeof body.full_name !== "string" || !body.full_name.trim() || !["administrador", "auxiliar", "planeador"].includes(body.role)) {
+            return NextResponse.json({ error: "Datos de perfil inválidos" }, { status: 400 });
+        }
+        if (body.id === session.user.id && body.role !== "administrador") {
+            return NextResponse.json({ error: "No puedes quitarte el rol administrador." }, { status: 400 });
+        }
+        const result = await admin.from("profiles").update({ full_name: body.full_name.trim(), role: body.role }).eq("id", body.id).is("deleted_at", null).select("id").single();
         if (result.error) return NextResponse.json({ error: "No se pudo actualizar el perfil" }, { status: 400 });
         return NextResponse.json({ success: true });
     } catch { return NextResponse.json({ error: "Solicitud inválida o servicio no disponible" }, { status: 400 }); }
+}
+
+export async function DELETE(request: Request) {
+    try {
+        const session = await adminSession();
+        if (session.response) return session.response;
+        const body: unknown = await request.json();
+        if (!body || typeof body !== "object" || !("id" in body) || typeof body.id !== "string") {
+            return NextResponse.json({ error: "Usuario inválido." }, { status: 400 });
+        }
+        if (body.id === session.user.id) {
+            return NextResponse.json({ error: "No puedes eliminar tu propia cuenta." }, { status: 403 });
+        }
+
+        const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false, autoRefreshToken: false } });
+        const prepared = await admin.rpc("prepare_user_deletion", {
+            p_target_id: body.id,
+            p_actor_id: session.user.id,
+        });
+        if (prepared.error) {
+            return NextResponse.json({ error: "No se pudo verificar la integridad del usuario. Comprueba que la migración de eliminación esté aplicada." }, { status: 409 });
+        }
+
+        if (prepared.data === true) {
+            const { error: deleteError } = await admin.auth.admin.deleteUser(body.id, false);
+            if (!deleteError) {
+                return NextResponse.json({ mode: "permanent", id: body.id });
+            }
+        }
+
+        // The database preparation already removed access and hid the profile.
+        // An Auth deletion rejected by a concurrent FK leaves this safe state.
+        return NextResponse.json({ mode: "historical", id: body.id });
+    } catch {
+        return NextResponse.json({ error: "Solicitud inválida o servicio no disponible." }, { status: 400 });
+    }
 }
 
 export async function POST(request: Request) {

@@ -42,6 +42,10 @@ export class DashboardCache {
   changeOrder = <T extends OrderState>(before: T | null, after: T) => {
     // Touch only order resources; numeric site IDs must never be patched as OT IDs.
     for (const [key, entry] of this.entries) {
+      if (key.startsWith("orders:search:")) {
+        this.invalidate(key);
+        continue;
+      }
       if (!key.startsWith("orders:")) continue;
       if (key.startsWith("orders:bucket:")) {
         const slug = key.slice("orders:bucket:".length);

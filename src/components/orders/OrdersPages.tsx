@@ -15,6 +15,7 @@ import { supabase } from "@/lib/supabase";
 import { useDashboardData } from "@/components/dashboard/DashboardDataProvider";
 import { Modal } from "@/components/ui/Modal";
 import { TimeField } from "@/components/ui/TimeField";
+import { AppIcon } from "@/components/ui/AppIcon";
 import { executeAction } from "@/lib/action-result";
 
 type Role = "administrador" | "planeador" | "auxiliar";
@@ -28,6 +29,7 @@ type Order = {
   site_id: number;
   maintenance_type: "preventivo" | "correctivo";
   description: string;
+  aviso: string | null;
   scheduled_date: string;
   scheduled_time: string | null;
   status:
@@ -46,6 +48,7 @@ type Order = {
   deleted_at: string | null;
   sites?: { name: string } | null;
   creator?: { full_name: string | null; role: Role } | null;
+  aviso_match?: boolean;
 };
 type Check = {
   id: number;
@@ -82,6 +85,16 @@ const formatNumber = (number: number) =>
   `OT-${String(number).padStart(6, "0")}`;
 const formatDate = (date: string) =>
   date ? date.split("-").reverse().join("/") : "-";
+const normalizeAviso = (subject: string) => `AVISO ${subject.trim().replace(/\s+/g, " ")}`;
+const validAviso = (subject: string) => /[\p{L}\p{N}]/u.test(subject);
+const emptyCreateOrderForm = {
+  siteId: "",
+  type: "preventivo",
+  avisoSubject: "",
+  description: "",
+  date: "",
+  time: "",
+};
 
 const orderSelect =
   "*, sites(name, requires_coproperty), creator:profiles!maintenance_orders_created_by_fkey(full_name, role)";
@@ -144,7 +157,7 @@ function useCachedQuery<T>(
   };
 }
 
-function useBucketOrders(slug: BucketSlug) {
+function useBucketOrders(slug: BucketSlug, limit: number) {
   const config = buckets[slug];
   return useCachedQuery<Order[]>(
     `orders:bucket:${slug}`,
@@ -152,7 +165,8 @@ function useBucketOrders(slug: BucketSlug) {
       let query = supabase
         .from("maintenance_orders")
         .select(orderSelect)
-        .order("id", { ascending: false });
+        .order("id", { ascending: false })
+        .limit(limit);
       query =
         slug === "eliminadas"
           ? query.not("deleted_at", "is", null)
@@ -163,7 +177,51 @@ function useBucketOrders(slug: BucketSlug) {
       if (result.error) throw result.error;
       return (result.data || []) as unknown as Order[];
     },
-    [slug],
+    [slug, limit],
+  );
+}
+
+type SearchBundle = { orders: Order[]; roots: Order[] };
+function useSearchOrders(slug: BucketSlug, term: string) {
+  const { version } = useDashboardData();
+  const key = `orders:search:${slug}:${term.toLocaleLowerCase("es-CO")}`;
+  return useCachedQuery<SearchBundle>(
+    key,
+    async () => {
+      if (!term) return { orders: [], roots: [] };
+      const matches = await supabase.rpc("search_maintenance_orders_v2", {
+        p_query: term,
+        p_bucket: slug,
+      });
+      if (matches.error) throw matches.error;
+      const refs = (matches.data || []) as { order_id: number; aviso_match: boolean }[];
+      const matchById = new Map(refs.map((item) => [Number(item.order_id), item.aviso_match]));
+      const rows: Order[] = [];
+      for (let offset = 0; offset < refs.length; offset += 200) {
+        const ids = refs.slice(offset, offset + 200).map((item) => item.order_id);
+        const result = await supabase.from("maintenance_orders")
+          .select(orderSelect).in("id", ids);
+        if (result.error) throw result.error;
+        rows.push(...((result.data || []) as unknown as Order[]));
+      }
+      const orders = rows.map((order) => ({
+        ...order,
+        aviso_match: matchById.get(order.id) || false,
+      })).sort((a, b) => b.id - a.id);
+      const presentIds = new Set(orders.map((order) => order.id));
+      const missingRoots = [...new Set(orders.filter((order) => order.aviso_match)
+        .map((order) => order.root_order_id || order.id))]
+        .filter((rootId) => !presentIds.has(rootId));
+      const roots: Order[] = [];
+      for (let offset = 0; offset < missingRoots.length; offset += 200) {
+        const result = await supabase.from("maintenance_orders")
+          .select(orderSelect).in("id", missingRoots.slice(offset, offset + 200));
+        if (result.error) throw result.error;
+        roots.push(...((result.data || []) as unknown as Order[]));
+      }
+      return { orders, roots };
+    },
+    [slug, term, version(key)],
   );
 }
 
@@ -190,14 +248,14 @@ function Status({ status }: { status: Order["status"] }) {
 function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
   if (!orders.length)
     return (
-      <p className="rounded-xl border bg-white p-6 text-sm text-slate-500">
+      <p className="app-card p-8 text-center text-sm text-slate-500">
         No hay órdenes en esta bandeja.
       </p>
     );
   return (
-    <div className="overflow-x-auto rounded-xl border bg-white">
-      <table className="min-w-[760px] w-full text-left text-sm">
-        <thead className="bg-slate-50 text-slate-600">
+    <div className="app-card overflow-x-auto">
+      <table className="app-table min-w-[760px] text-left text-sm">
+        <thead className="text-xs uppercase tracking-[.12em]">
           <tr>
             <th className="p-3">OT</th>
             <th className="p-3">Sede</th>
@@ -210,9 +268,12 @@ function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
         </thead>
         <tbody className="divide-y">
           {orders.map((order) => (
-            <tr key={order.id} className="hover:bg-slate-50">
-              <td className="p-3 font-semibold">
+            <tr key={order.id}>
+              <td className="p-3 font-semibold text-blue-200">
                 {formatNumber(order.order_number)}
+                <span className="mt-0.5 block max-w-64 truncate text-xs font-normal text-slate-500" title={order.aviso || "Sin aviso"}>
+                  {order.aviso || "Sin aviso"}
+                </span>
               </td>
               <td className="p-3 capitalize">{order.sites?.name || "-"}</td>
               <td className="p-3 capitalize">{order.maintenance_type}</td>
@@ -228,7 +289,7 @@ function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
               </td>
               <td className="p-3">
                 <Link
-                  className="font-semibold text-blue-700 hover:underline"
+                  className="font-semibold text-blue-300 transition hover:text-blue-200 hover:underline"
                   href={`${orderPath(order.id)}${from ? `?from=${from}` : ""}`}
                 >
                   Ver orden
@@ -242,6 +303,71 @@ function OrderTable({ orders, from }: { orders: Order[]; from?: string }) {
   );
 }
 
+function OrderSearchResults({ bundle, from }: { bundle: SearchBundle; from: BucketSlug }) {
+  const [expanded, setExpanded] = useState<number[]>([]);
+  const groups = new Map<number, Order[]>();
+  const standalone: Order[] = [];
+  for (const order of bundle.orders) {
+    if (!order.aviso_match) {
+      standalone.push(order);
+      continue;
+    }
+    const rootId = order.root_order_id || order.id;
+    groups.set(rootId, [...(groups.get(rootId) || []), order]);
+  }
+  if (!bundle.orders.length) return <OrderTable orders={[]} from={from} />;
+  return (
+    <div className="space-y-4">
+      {[...groups.entries()].map(([rootId, members]) => {
+        const root = members.find((item) => item.id === rootId)
+          || bundle.roots.find((item) => item.id === rootId);
+        const children = members.filter((item) => item.id !== rootId)
+          .sort((a, b) => a.reprogramming_number - b.reprogramming_number || a.id - b.id);
+        const isExpanded = expanded.includes(rootId);
+        return (
+          <section key={rootId} className="app-card overflow-hidden">
+            <div className="flex items-center gap-3 border-b border-blue-400/15 bg-blue-500/8 px-4 py-4">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-500/15 text-blue-300"><AppIcon name="document" className="h-5 w-5" /></span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-semibold uppercase tracking-[.14em] text-blue-300">Familia AVISO</p>
+                <h2 className="mt-0.5 truncate font-semibold text-slate-900" title={root?.aviso || members[0]?.aviso || "Sin aviso"}>{root?.aviso || members[0]?.aviso || "Sin aviso"}</h2>
+              </div>
+              <span className="rounded-full border border-blue-400/20 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-200">{members.length} OT</span>
+            </div>
+            {root && (
+              <div className="relative flex flex-wrap items-center justify-between gap-3 px-4 py-4 pl-10 before:absolute before:left-[19px] before:top-0 before:h-full before:w-px before:bg-blue-400/20 after:absolute after:left-[14px] after:top-6 after:h-3 after:w-3 after:rounded-full after:border-2 after:border-blue-300 after:bg-[#0d1928]">
+                <div>
+                  <p className="font-semibold text-slate-900">{formatNumber(root.order_number)} <span className="ml-2 text-xs font-normal text-slate-500">Orden original</span></p>
+                  <p className="mt-0.5 text-xs text-slate-500">{formatDate(root.scheduled_date)}{root.scheduled_time ? ` · ${root.scheduled_time.slice(0, 5)}` : ""} · {root.sites?.name || "Sede sin nombre"}{!members.some((item) => item.id === rootId) ? " · Fuera de esta bandeja" : ""}</p>
+                </div>
+                <div className="flex items-center gap-3"><Status status={root.status} /><Link href={`${orderPath(root.id)}?from=${from}`} className="text-sm font-semibold text-blue-300 hover:underline">Ver detalle</Link></div>
+              </div>
+            )}
+            {children.length > 0 && (
+              <>
+                <button type="button" aria-expanded={isExpanded} onClick={() => setExpanded((current) => isExpanded ? current.filter((id) => id !== rootId) : [...current, rootId])} className="flex w-full items-center gap-2 border-t border-slate-100 px-4 py-3 text-left text-sm font-semibold text-blue-300 hover:bg-slate-50">
+                  <AppIcon name="chevron" className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`} /> Ver reprogramaciones ({children.length})
+                </button>
+                {isExpanded && (
+                  <div className="app-reveal divide-y divide-slate-100 border-t border-slate-100 bg-slate-950/25">
+                    {children.map((child) => (
+                      <div key={child.id} className="relative flex flex-wrap items-center justify-between gap-2 px-4 py-3 pl-10 text-sm before:absolute before:left-[19px] before:top-0 before:h-full before:w-px before:bg-blue-400/20 after:absolute after:left-[14px] after:top-5 after:h-3 after:w-3 after:rounded-full after:border-2 after:border-violet-300 after:bg-[#0d1928]">
+                        <div><p className="font-semibold text-slate-800">{formatNumber(child.order_number)} <span className="font-normal text-slate-500">Reprogramación {child.reprogramming_number}</span></p><p className="text-xs text-slate-500">{formatDate(child.scheduled_date)}{child.scheduled_time ? ` · ${child.scheduled_time.slice(0, 5)}` : ""} · {child.sites?.name || "Sede sin nombre"}</p></div>
+                        <div className="flex items-center gap-3"><Status status={child.status} /><Link href={`${orderPath(child.id)}?from=${from}`} className="font-semibold text-blue-300 hover:underline">Ver detalle</Link></div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        );
+      })}
+      {standalone.length > 0 && <OrderTable orders={standalone} from={from} />}
+    </div>
+  );
+}
+
 export function CreateOrderForm({ enabled }: { enabled: boolean }) {
   const router = useRouter();
   const { read, fetch, changeOrder, invalidate } = useDashboardData();
@@ -250,13 +376,7 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [form, setForm] = useState({
-    siteId: "",
-    type: "preventivo",
-    description: "",
-    date: "",
-    time: "",
-  });
+  const [form, setForm] = useState(emptyCreateOrderForm);
   useEffect(() => {
     if (!enabled || !open) return;
     void fetch("sites:active", async () => {
@@ -285,6 +405,9 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
       description: form.description.trim()
         ? ""
         : "La descripción es obligatoria.",
+      aviso: validAviso(form.avisoSubject)
+        ? ""
+        : "Ingresa el AVISO de la orden.",
     };
     if (Object.values(nextErrors).some(Boolean)) {
       setFieldErrors(nextErrors);
@@ -297,6 +420,7 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
         p_site_id: Number(form.siteId),
         p_maintenance_type: form.type,
         p_description: form.description.trim(),
+        p_aviso: normalizeAviso(form.avisoSubject),
         p_scheduled_date: form.date,
         p_scheduled_time: form.time,
       }),
@@ -339,16 +463,19 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
         onClick={() => {
           setError("");
           setFieldErrors({});
+          setForm({ ...emptyCreateOrderForm });
           setOpen(true);
         }}
-        className="min-h-11 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white"
+        className="app-button-primary min-h-11 px-4 py-2 text-sm"
       >
-        + Nueva orden
+        <AppIcon name="plus" className="h-4 w-4" /> Nueva orden
       </button>
       {open && (
         <Modal
           title="Nueva orden de mantenimiento"
           description="Completa la información para crear una nueva orden."
+          icon={<AppIcon name="document" className="h-5 w-5" />}
+          closeDisabled={saving}
           onClose={() => !saving && setOpen(false)}
         >
           <form
@@ -363,7 +490,7 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
                 onChange={(event) =>
                   setForm({ ...form, siteId: event.target.value })
                 }
-                className="min-h-11 rounded-lg border bg-white px-3 py-2"
+                className="app-field px-3 py-2"
               >
                 <option value="">Selecciona sede</option>
                 {availableSites.map((site) => (
@@ -385,11 +512,25 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
                 onChange={(event) =>
                   setForm({ ...form, type: event.target.value })
                 }
-                className="min-h-11 rounded-lg border bg-white px-3 py-2"
+                className="app-field px-3 py-2"
               >
                 <option value="preventivo">Preventivo</option>
                 <option value="correctivo">Correctivo</option>
               </select>
+            </label>
+            <label className="grid gap-1 text-sm font-medium">
+              AVISO *
+              <span className="app-field flex min-w-0 overflow-hidden">
+                <span aria-hidden="true" className="pointer-events-none flex select-none items-center border-r border-white/10 bg-blue-500/10 px-3 text-sm font-bold tracking-wide text-blue-200">AVISO</span>
+                <input
+                  type="text"
+                  aria-label="Contenido del AVISO"
+                  value={form.avisoSubject}
+                  onChange={(event) => setForm({ ...form, avisoSubject: event.target.value })}
+                  className="min-w-0 flex-1 border-0 bg-transparent px-3 py-2 shadow-none outline-none focus:shadow-none"
+                />
+              </span>
+              {fieldErrors.aviso && <span className="text-xs text-red-700">{fieldErrors.aviso}</span>}
             </label>
             <label className="grid gap-1 text-sm font-medium">
               Fecha *
@@ -399,7 +540,7 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
                 onChange={(event) =>
                   setForm({ ...form, date: event.target.value })
                 }
-                className="min-h-11 rounded-lg border px-3 py-2"
+                className="app-field px-3 py-2"
               />
               {fieldErrors.date && (
                 <span className="text-xs text-red-700">{fieldErrors.date}</span>
@@ -424,7 +565,7 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
                   setForm({ ...form, description: event.target.value })
                 }
                 placeholder="Describe el trabajo a realizar..."
-                className="min-h-28 rounded-lg border p-3"
+                className="app-field min-h-28 p-3"
               />
               {fieldErrors.description && (
                 <span className="text-xs text-red-700">
@@ -444,13 +585,13 @@ export function CreateOrderForm({ enabled }: { enabled: boolean }) {
                 type="button"
                 disabled={saving}
                 onClick={() => setOpen(false)}
-                className="min-h-11 rounded-lg border px-4 py-2 text-sm font-medium"
+                className="app-button-secondary min-h-11 px-4 py-2 text-sm"
               >
                 Cancelar
               </button>
               <button
                 disabled={saving}
-                className="min-h-11 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                className="app-button-primary min-h-11 px-4 py-2 text-sm"
               >
                 {saving ? "Creando…" : "Crear orden"}
               </button>
@@ -505,42 +646,46 @@ export function OrdersOverview() {
     [counts, profile],
   );
   return (
-    <main className="mx-auto max-w-7xl space-y-6 p-4 md:p-6">
-      <div>
+    <main className="app-page mx-auto max-w-7xl space-y-7 p-4 md:p-8">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
         <Link
           href="/dashboard"
-          className="text-sm font-semibold text-slate-600 hover:text-blue-700"
+          className="text-sm font-semibold text-blue-300 hover:text-blue-200"
         >
-          ← Dashboard
+          ← Inicio
         </Link>
-        <h1 className="mt-3 text-2xl font-bold">Órdenes de mantenimiento</h1>
-        <p className="text-sm text-slate-500">
-          Selecciona una bandeja para ver sus órdenes.
+        <h1 className="mt-4 text-3xl font-bold tracking-tight">Órdenes de mantenimiento</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Organiza el trabajo por estado y abre la bandeja que necesitas.
         </p>
+        </div>
+        <CreateOrderForm
+          enabled={profile?.role === "planeador" || profile?.role === "administrador"}
+        />
       </div>
-      <CreateOrderForm
-        enabled={
-          profile?.role === "planeador" || profile?.role === "administrador"
-        }
-      />
       {error && (
         <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-red-700">
           {error}
         </p>
       )}
-      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {cards.map((card) => (
           <Link
             key={card.slug}
             href={`/dashboard/ordenes/${card.slug}`}
-            className="rounded-2xl border bg-white p-5 shadow-sm transition hover:border-blue-300 hover:shadow"
+            className="app-card app-hover-card group p-5"
           >
-            <p className="text-sm text-slate-500">{card.title}</p>
-            <p className="mt-2 text-3xl font-bold">
+            <div className="flex items-start justify-between gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10 text-blue-300"><AppIcon name="document" className="h-5 w-5" /></span>
+              <AppIcon name="arrow" className="h-4 w-4 text-slate-500 transition group-hover:translate-x-1 group-hover:text-blue-300" />
+            </div>
+            <p className="mt-5 text-sm text-slate-400">{card.title}</p>
+            <p className="mt-1 text-3xl font-bold tracking-tight">
               {loading ? "…" : card.count}
             </p>
-            <p className="mt-3 text-sm font-semibold text-blue-700">
-              Abrir bandeja →
+            <p className="mt-5 text-sm font-semibold text-blue-300">
+              Ver órdenes
             </p>
           </Link>
         ))}
@@ -551,18 +696,18 @@ export function OrdersOverview() {
 
 export function OrdersBucket({ slug }: { slug: BucketSlug }) {
   const { profile } = useDashboardData();
-  const { data: orders, loading, error } = useBucketOrders(slug);
+  const [limit, setLimit] = useState(100);
+  const { data: orders, loading, error } = useBucketOrders(slug, limit);
   const [search, setSearch] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setSearchTerm(search.trim()), 250);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
+  const { data: searchResults, loading: searchLoading, error: searchError } = useSearchOrders(slug, searchTerm);
   const config = buckets[slug];
-  const visible = useMemo(
-    () =>
-      (orders || []).filter((order) =>
-        `${order.order_number} ${order.description} ${order.sites?.name || ""}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
-    [orders, search],
-  );
+  const searching = Boolean(search.trim());
+  const waitingForSearch = searching && (search.trim() !== searchTerm || searchLoading);
   if (slug === "eliminadas" && profile.role !== "administrador")
     return (
       <main className="p-6">
@@ -571,31 +716,53 @@ export function OrdersBucket({ slug }: { slug: BucketSlug }) {
       </main>
     );
   return (
-    <main className="mx-auto max-w-7xl space-y-5 p-4 md:p-6">
+    <main className="app-page mx-auto max-w-7xl space-y-6 p-4 md:p-8">
       <Link
         href="/dashboard"
-        className="text-sm font-semibold text-slate-600 hover:text-blue-700"
+        className="text-sm font-semibold text-blue-300 hover:text-blue-200"
       >
         ← Volver al inicio
       </Link>
-      <div>
-        <h1 className="text-2xl font-bold">{config.title}</h1>
-        <p className="text-sm text-slate-500">
-          {loading ? "Cargando…" : `${visible.length} orden(es)`}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+        <p className="text-xs font-semibold uppercase tracking-[.15em] text-blue-300">Órdenes de mantenimiento</p>
+        <h1 className="mt-2 text-3xl font-bold tracking-tight">{config.title}</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          {searching
+            ? waitingForSearch ? "Buscando…" : `${searchResults?.orders.length || 0} orden(es) encontradas`
+            : loading && !orders ? "Cargando…" : `Mostrando ${orders?.length || 0} orden(es)`}
         </p>
+        </div>
       </div>
-      <input
-        value={search}
-        onChange={(event) => setSearch(event.target.value)}
-        placeholder="Buscar por OT, sede o descripción"
-        className="w-full rounded-xl border px-4 py-3"
-      />
-      {error ? (
+      <div className="app-field flex items-center gap-3 px-4">
+        <AppIcon name="search" className="h-5 w-5 shrink-0 text-slate-400" />
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Buscar por OT, AVISO, sede o descripción"
+          aria-label="Buscar órdenes por OT, AVISO, sede o descripción"
+          className="min-h-11 w-full border-0 bg-transparent py-2 outline-none"
+        />
+      </div>
+      {searching ? searchError ? (
+        <p className="text-red-700">{searchError}</p>
+      ) : waitingForSearch || !searchResults ? (
+        <div className="app-card h-48 animate-pulse" />
+      ) : (
+        <OrderSearchResults key={`${slug}:${searchTerm}`} bundle={searchResults} from={slug} />
+      ) : error ? (
         <p className="text-red-700">{error}</p>
       ) : loading && !orders ? (
-        <div className="h-48 animate-pulse rounded-xl border bg-slate-100" />
+        <div className="app-card h-48 animate-pulse" />
       ) : (
-        <OrderTable orders={visible} from={slug} />
+        <>
+          <OrderTable orders={orders || []} from={slug} />
+          {(orders?.length || 0) >= limit && (
+            <button type="button" disabled={loading} onClick={() => setLimit((current) => current + 100)} className="app-button-secondary min-h-11 px-4 py-2 text-sm">
+              {loading ? "Cargando…" : "Cargar más órdenes"}
+            </button>
+          )}
+        </>
       )}
     </main>
   );
@@ -833,11 +1000,11 @@ export function OrderDetail({ id }: { id: number }) {
   if (loading)
     return (
       <main className="mx-auto max-w-6xl space-y-5 p-4 md:p-6">
-        <div className="h-5 w-32 animate-pulse rounded bg-slate-200" />
-        <div className="h-28 animate-pulse rounded-2xl bg-slate-100" />
+        <div className="h-5 w-32 animate-pulse rounded bg-[#233a55]" />
+        <div className="app-card h-28 animate-pulse" />
         <div className="grid gap-4 md:grid-cols-2">
-          <div className="h-48 animate-pulse rounded-2xl bg-slate-100" />
-          <div className="h-48 animate-pulse rounded-2xl bg-slate-100" />
+          <div className="app-card h-48 animate-pulse" />
+          <div className="app-card h-48 animate-pulse" />
         </div>
       </main>
     );
@@ -866,7 +1033,10 @@ export function OrderDetail({ id }: { id: number }) {
     order.approval_status === "aprobada";
   const canReprogram =
     canManage &&
-    ["pendiente", "programada", "en_ejecucion"].includes(order.status);
+    !order.deleted_at &&
+    ["pendiente", "programada", "en_ejecucion"].includes(order.status) &&
+    Boolean(order.aviso);
+  const rootOrder = history.find((item) => item.id === order.root_order_id);
   const from = searchParams.get("from");
   const returnHref =
     from && from in buckets ? `/dashboard/ordenes/${from}` : "/dashboard";
@@ -890,10 +1060,10 @@ export function OrderDetail({ id }: { id: number }) {
             ? "Esta orden fue completada."
             : "Esta orden no tiene acciones operativas disponibles.";
   return (
-    <main className="mx-auto max-w-6xl space-y-5 p-4 md:p-6">
+    <main className="app-page mx-auto max-w-6xl space-y-6 p-4 md:p-8">
       <Link
         href={returnHref}
-        className="text-sm font-semibold text-slate-600 hover:text-blue-700"
+        className="text-sm font-semibold text-blue-300 hover:text-blue-200"
       >
         ← {returnLabel}
       </Link>
@@ -907,24 +1077,30 @@ export function OrderDetail({ id }: { id: number }) {
           {actionError}
         </p>
       )}
-      <header className="border-b pb-4">
+      <header className="app-hero relative overflow-hidden rounded-2xl p-5 sm:p-7">
+        <div className="app-grid-pattern pointer-events-none absolute inset-0 opacity-70" />
+        <div className="relative">
+        <p className="text-xs font-bold uppercase tracking-[.16em] text-blue-300">Aviso de mantenimiento</p>
+        <p className="mt-2 max-w-3xl break-words text-xl font-bold tracking-tight sm:text-2xl">{order.aviso || "Sin aviso"}</p>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold">
+            <h1 className="mt-3 text-sm font-semibold text-blue-200">
               {formatNumber(order.order_number)}
             </h1>
-            <p className="mt-1 capitalize text-slate-600">
+            <p className="mt-1 text-sm capitalize text-slate-300">
               Mantenimiento {order.maintenance_type} · Sede:{" "}
               {order.sites?.name || "-"}
             </p>
           </div>
           <Status status={order.status} />
         </div>
+        {order.parent_order_id && <p className="mt-4 text-xs text-slate-300">Reprogramación {order.reprogramming_number} de la familia iniciada en {rootOrder ? formatNumber(rootOrder.order_number) : "la orden original"}</p>}
+        </div>
       </header>
       <section className="grid gap-5 lg:grid-cols-[1.4fr_0.8fr]">
-        <div className="rounded-2xl border bg-white p-5">
+        <div className="app-card p-5 sm:p-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">
-            Información de la orden
+            Información general
           </h2>
           <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
             <div>
@@ -971,8 +1147,8 @@ export function OrderDetail({ id }: { id: number }) {
             <p className="mt-1 text-sm text-slate-600">{order.description}</p>
           </div>
         </div>
-        <aside className="rounded-2xl border bg-white p-5">
-          <h2 className="font-bold">Estado de la orden</h2>
+        <aside className="app-card p-5 sm:p-6">
+          <h2 className="font-bold">Estado y acciones</h2>
           <div className="mt-3">
             <Status status={order.status} />
           </div>
@@ -996,7 +1172,7 @@ export function OrderDetail({ id }: { id: number }) {
                     patch: { status: "programada", approval_status: "aprobada" },
                   })
                 }
-                className="mt-4 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                className="app-button-primary mt-4 min-h-11 px-4 py-2 text-sm"
               >
                 Aprobar orden
               </button>
@@ -1014,7 +1190,7 @@ export function OrderDetail({ id }: { id: number }) {
               onClick={() =>
                 void run({ context: "Inicio de gestión", successMessage: "Gestión iniciada correctamente.", request: () => supabase.rpc("start_maintenance_order", { p_order_id: id }), patch: { status: "en_ejecucion" } })
               }
-              className="mt-4 rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white disabled:opacity-50"
+              className="app-button-primary mt-4 min-h-11 px-4 py-2 text-sm"
             >
               Iniciar gestión
             </button>
@@ -1032,7 +1208,7 @@ export function OrderDetail({ id }: { id: number }) {
                   patch: { status: "completada" },
                 })
               }
-              className="mt-4 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white disabled:opacity-50"
+              className="app-button-primary mt-4 min-h-11 px-4 py-2 text-sm"
             >
               Completar orden
             </button>
@@ -1044,16 +1220,19 @@ export function OrderDetail({ id }: { id: number }) {
                 setReprogramErrors({});
                 setReprogramOpen(true);
               }}
-              className="mt-4 rounded-lg border border-purple-200 bg-purple-50 px-4 py-2 font-semibold text-purple-700 disabled:opacity-50"
+              className="app-button-secondary mt-4 min-h-11 px-4 py-2 text-sm text-violet-200"
             >
               Reprogramar
             </button>
+          )}
+          {canManage && !order.deleted_at && !order.aviso && ["pendiente", "programada", "en_ejecucion"].includes(order.status) && (
+            <p className="mt-4 text-xs text-amber-700">Esta OT histórica no tiene AVISO; no puede generar una reprogramación nueva sin ese requisito.</p>
           )}
           {profile.role === "administrador" && !order.deleted_at && (
             <button
               disabled={saving}
               onClick={() => setDeleteOpen(true)}
-              className="mt-6 block rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+              className="app-button-danger mt-6 min-h-11 px-4 py-2 text-sm"
             >
               Eliminar orden
             </button>
@@ -1064,6 +1243,8 @@ export function OrderDetail({ id }: { id: number }) {
         <Modal
           title="Reprogramar orden"
           description={`${formatNumber(order.order_number)} · Selecciona la nueva programación.`}
+          icon={<AppIcon name="calendar" className="h-5 w-5" />}
+          closeDisabled={saving}
           onClose={() => !saving && setReprogramOpen(false)}
         >
           <form
@@ -1085,7 +1266,7 @@ export function OrderDetail({ id }: { id: number }) {
                     date: event.target.value,
                   })
                 }
-                className="min-h-11 rounded-lg border px-3 py-2"
+                className="app-field px-3 py-2"
               />
               {reprogramErrors.date && (
                 <span className="text-xs text-red-700">
@@ -1119,7 +1300,7 @@ export function OrderDetail({ id }: { id: number }) {
                   })
                 }
                 placeholder="Ej: Ajuste de agenda, disponibilidad"
-                className="min-h-28 rounded-lg border p-3"
+                className="app-field min-h-28 p-3"
               />
               {reprogramErrors.reason && (
                 <span className="text-xs text-red-700">
@@ -1132,13 +1313,13 @@ export function OrderDetail({ id }: { id: number }) {
                 type="button"
                 disabled={saving}
                 onClick={() => setReprogramOpen(false)}
-                className="min-h-11 rounded-lg border px-4 py-2 text-sm font-medium"
+                className="app-button-secondary min-h-11 px-4 py-2 text-sm"
               >
                 Cancelar
               </button>
               <button
                 disabled={saving}
-                className="min-h-11 rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                className="app-button-primary min-h-11 px-4 py-2 text-sm"
               >
                 {saving ? "Reprogramando…" : "Reprogramar"}
               </button>
@@ -1150,6 +1331,8 @@ export function OrderDetail({ id }: { id: number }) {
         <Modal
           title={`¿Eliminar ${formatNumber(order.order_number)}?`}
           description="La orden dejará de aparecer en las bandejas activas, pero permanecerá en el registro de eliminadas."
+          icon={<AppIcon name="ban" className="h-5 w-5" />}
+          closeDisabled={saving}
           onClose={() => !saving && setDeleteOpen(false)}
         >
           <div className="flex justify-end gap-3 p-5 sm:p-6">
@@ -1157,7 +1340,7 @@ export function OrderDetail({ id }: { id: number }) {
               type="button"
               disabled={saving}
               onClick={() => setDeleteOpen(false)}
-              className="min-h-11 rounded-lg border px-4 py-2"
+              className="app-button-secondary min-h-11 px-4 py-2"
             >
               Cancelar
             </button>
@@ -1165,21 +1348,21 @@ export function OrderDetail({ id }: { id: number }) {
               type="button"
               disabled={saving}
               onClick={() => void deleteOrder()}
-              className="min-h-11 rounded-lg bg-red-600 px-4 py-2 font-semibold text-white disabled:opacity-50"
+              className="app-button-danger min-h-11 px-4 py-2"
             >
               {saving ? "Eliminando…" : "Eliminar orden"}
             </button>
           </div>
         </Modal>
       )}
-      <section className="rounded-2xl border bg-white p-5">
-        <h2 className="text-lg font-bold">Documentación</h2>
+      <section className="app-card p-5 sm:p-6">
+        <h2 className="text-lg font-bold">Validación documental</h2>
         {checksLoading ? (
           <p className="mt-4">Cargando…</p>
         ) : (
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             {applicable.map((check) => (
-              <article key={check.id} className="rounded-xl border p-4">
+              <article key={check.id} className="app-card-soft p-4">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">{labels[check.check_type]}</h3>
                   <StatusBadge status={check.status} kind="document" />
@@ -1194,21 +1377,21 @@ export function OrderDetail({ id }: { id: number }) {
                     <button
                       disabled={saving || updatingCheckId !== null}
                       onClick={() => updateCheck(check, "cumple")}
-                      className="rounded border px-3 py-1 text-sm text-green-700"
+                      className="app-button-secondary min-h-10 px-3 py-1 text-sm text-green-300"
                     >
                       Cumple
                     </button>
                     <button
                       disabled={saving || updatingCheckId !== null}
                       onClick={() => updateCheck(check, "no_cumple")}
-                      className="rounded border px-3 py-1 text-sm text-red-700"
+                      className="app-button-secondary min-h-10 px-3 py-1 text-sm text-red-300"
                     >
                       No cumple
                     </button>
                     <button
                       disabled={saving || updatingCheckId !== null}
                       onClick={() => updateCheck(check, "pendiente")}
-                      className="rounded border px-3 py-1 text-sm"
+                      className="app-button-secondary min-h-10 px-3 py-1 text-sm"
                     >
                       Pendiente
                     </button>
@@ -1219,7 +1402,7 @@ export function OrderDetail({ id }: { id: number }) {
           </div>
         )}
       </section>
-      <section className="rounded-2xl border bg-white p-5">
+      <section className="app-card p-5 sm:p-6">
         <h2 className="text-lg font-bold">Historial de reprogramaciones</h2>
         {history.length > 1 ? (
           <div className="mt-4">

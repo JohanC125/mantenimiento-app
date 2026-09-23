@@ -5,6 +5,8 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { useDashboardData } from "@/components/dashboard/DashboardDataProvider";
 import { CreateOrderForm } from "@/components/orders/OrdersPages";
+import { StatusBadge } from "@/components/orders/StatusBadge";
+import { AppIcon, type AppIconName } from "@/components/ui/AppIcon";
 
 type Role = "administrador" | "planeador" | "auxiliar";
 
@@ -22,6 +24,7 @@ type RecentOrder = {
   id: string;
   order_number: string;
   description: string | null;
+  aviso: string | null;
   status: string;
   scheduled_date: string | null;
   maintenance_type: string | null;
@@ -42,23 +45,14 @@ const initialMetrics: Metrics = {
   activeUsers: 0,
 };
 
-const statusLabels: Record<string, string> = {
-  pendiente: "Pendiente",
-  programada: "Programada",
-  en_ejecucion: "En ejecución",
-  completada: "Completada",
-  reprogramada: "Reprogramada",
-  cancelada: "Cancelada",
-};
-
-const statusStyles: Record<string, string> = {
-  pendiente: "bg-yellow-100 text-yellow-800",
-  programada: "bg-blue-100 text-blue-800",
-  en_ejecucion: "bg-orange-100 text-orange-800",
-  completada: "bg-green-100 text-green-800",
-  reprogramada: "bg-purple-100 text-purple-800",
-  cancelada: "bg-red-100 text-red-800",
-};
+const toneClass = {
+  amber: "bg-amber-500/12 text-amber-200",
+  blue: "bg-blue-500/12 text-blue-200",
+  cyan: "bg-cyan-500/12 text-cyan-200",
+  green: "bg-emerald-500/12 text-emerald-200",
+  violet: "bg-violet-500/12 text-violet-200",
+  red: "bg-red-500/12 text-red-200",
+} as const;
 
 function formatDate(date: string | null) {
   if (!date) return "Sin fecha";
@@ -135,7 +129,7 @@ export default function DashboardPage() {
         const recentRequest = supabase
           .from("maintenance_orders")
           .select(
-            `id, order_number, description, status, scheduled_date, maintenance_type, site:sites (name)`,
+            `id, order_number, aviso, description, status, scheduled_date, maintenance_type, site:sites (name)`,
           )
           .is("deleted_at", null)
           .order("created_at", { ascending: false })
@@ -216,8 +210,8 @@ export default function DashboardPage() {
     return (
       <div className="flex min-h-[calc(100vh-80px)] items-center justify-center">
         <div className="text-center">
-          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600" />
-          <p className="text-sm text-gray-500">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-white/10 border-t-blue-400" />
+          <p className="text-sm text-slate-400">
             Cargando información del sistema...
           </p>
         </div>
@@ -228,16 +222,16 @@ export default function DashboardPage() {
   if (error && !hasInitialCache) {
     return (
       <div className="p-6">
-        <div className="rounded-xl border border-red-200 bg-red-50 p-5">
-          <h2 className="font-semibold text-red-800">
+        <div className="app-card border-red-400/20 p-5">
+          <h2 className="font-semibold text-red-200">
             No fue posible cargar el dashboard
           </h2>
 
-          <p className="mt-2 text-sm text-red-700">{error}</p>
+          <p className="mt-2 text-sm text-red-300">{error}</p>
 
           <button
             onClick={loadDashboard}
-            className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+            className="app-button-danger mt-4 px-4 py-2 text-sm"
           >
             Intentar nuevamente
           </button>
@@ -247,58 +241,37 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="min-h-[calc(100vh-80px)] bg-gray-50 p-4 sm:p-6 lg:p-8">
-      <div className="mx-auto max-w-7xl space-y-6">
-        {/* Bienvenida */}
-        <section className="rounded-2xl bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-medium text-blue-600">
-                Sistema de Gestión de Mantenimiento
-              </p>
-
-              <h1 className="mt-1 text-2xl font-bold text-gray-900 sm:text-3xl">
-                Bienvenido, {profile.full_name || "Usuario"}
-              </h1>
-
-              <p className="mt-2 text-sm text-gray-500">
-                {getRoleLabel(profile.role)}
-              </p>
-            </div>
-
-            <button
-              onClick={loadDashboard}
-              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
-            >
-              Actualizar
-            </button>
+    <main className="app-page min-h-[calc(100vh-80px)] p-4 sm:p-6 lg:p-8">
+      <div className="mx-auto max-w-7xl space-y-7">
+        <section className="app-hero relative overflow-hidden rounded-3xl p-6 sm:p-8 lg:p-10">
+          <div aria-hidden className="app-grid-pattern pointer-events-none absolute inset-0 opacity-70" />
+          <div className="relative z-10 flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+            <div className="max-w-2xl"><p className="mb-3 text-xs font-bold uppercase tracking-[.22em] text-blue-300">Panel de control · {getRoleLabel(profile.role)}</p><h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">Órdenes de Mantenimiento</h1><p className="mt-3 text-sm leading-6 text-slate-300 sm:text-base">Controla, programa y da seguimiento a todas tus órdenes en un solo lugar.</p></div>
+            <div className="flex shrink-0 flex-wrap items-center gap-3"><CreateOrderForm enabled={profile.role === "planeador" || profile.role === "administrador"} /><button onClick={loadDashboard} className="app-button-secondary min-h-11 px-4 text-sm"><AppIcon name="refresh" className="h-4 w-4" /> Actualizar</button></div>
           </div>
+          <div aria-hidden className="pointer-events-none absolute -right-14 -top-16 h-64 w-64 rounded-full bg-blue-500/10 blur-3xl" />
         </section>
 
         {/* Resumen de órdenes */}
         <section>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">
-                Resumen de órdenes
+              <h2 className="text-lg font-semibold text-slate-50">
+                Resumen operativo
               </h2>
-              <p className="text-sm text-gray-500">
+              <p className="text-sm text-slate-400">
                 Estado actual de las órdenes de mantenimiento.
               </p>
             </div>
-            <CreateOrderForm
-              enabled={
-                profile.role === "planeador" || profile.role === "administrador"
-              }
-            />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
             <MetricCard
               title="Pendientes"
               value={metrics.pendingOrders}
               description="Esperando validación y aprobación"
-              icon="📋"
+              icon="document"
+              tone="amber"
               href="/dashboard/ordenes/pendientes"
             />
 
@@ -306,7 +279,8 @@ export default function DashboardPage() {
               title="Programadas"
               value={metrics.scheduledOrders}
               description="Aprobadas por Auxiliar/Admin"
-              icon="📅"
+              icon="calendar"
+              tone="blue"
               href="/dashboard/ordenes/programadas"
             />
 
@@ -314,7 +288,8 @@ export default function DashboardPage() {
               title="En ejecución"
               value={metrics.inProgressOrders}
               description="Trabajos activos"
-              icon="🔧"
+              icon="activity"
+              tone="cyan"
               href="/dashboard/ordenes/en-ejecucion"
             />
 
@@ -322,39 +297,17 @@ export default function DashboardPage() {
               title="Completadas"
               value={metrics.completedOrders}
               description="Órdenes finalizadas"
-              icon="✅"
+              icon="check"
+              tone="green"
               href="/dashboard/ordenes/completadas"
             />
+            <MetricCard title="Reprogramadas" value={metrics.rescheduledOrders} description="Cambios de programación" icon="refresh" tone="violet" href="/dashboard/ordenes/reprogramadas" />
+            <MetricCard title="Canceladas" value={metrics.cancelledOrders} description="Órdenes canceladas" icon="ban" tone="red" href="/dashboard/ordenes/canceladas" />
           </div>
         </section>
 
         {/* Situaciones especiales */}
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <StatusCard
-            title="Reprogramadas"
-            value={metrics.rescheduledOrders}
-            description="Órdenes que cambiaron de programación"
-            icon="🔄"
-            href="/dashboard/ordenes/reprogramadas"
-          />
-
-          <StatusCard
-            title="Canceladas"
-            value={metrics.cancelledOrders}
-            description="Órdenes canceladas"
-            icon="🚫"
-            href="/dashboard/ordenes/canceladas"
-          />
-
-          {profile.role === "administrador" ? (
-            <StatusCard
-              title="Usuarios activos"
-              value={metrics.activeUsers}
-              description="Usuarios habilitados en el sistema"
-              icon="👥"
-            />
-          ) : null}
-        </section>
+        {profile.role === "administrador" && <section className="app-card-soft flex items-center gap-4 p-4 sm:max-w-sm"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/15 text-blue-300"><AppIcon name="users" className="h-5 w-5" /></span><div><p className="text-xs text-slate-400">Usuarios activos</p><p className="text-xl font-bold text-slate-50">{metrics.activeUsers}</p></div></section>}
         {profile.role === "administrador" && (
           <Link
             href="/dashboard/ordenes/eliminadas"
@@ -364,89 +317,14 @@ export default function DashboardPage() {
           </Link>
         )}
 
-        {/* Órdenes recientes */}
-        <section className="rounded-2xl bg-white shadow-sm">
-          <div className="flex flex-col gap-2 border-b border-gray-100 p-6 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">
-                Órdenes recientes
-              </h2>
-
-              <p className="text-sm text-gray-500">
-                Últimas órdenes registradas en el sistema.
-              </p>
-            </div>
-
-            <Link
-              href="/dashboard/ordenes/todas"
-              className="text-sm font-medium text-blue-600 hover:text-blue-700"
-            >
-              Ver todas →
-            </Link>
-          </div>
-
-          {loadingOrders ? (
-            <div className="p-6 text-sm text-gray-500">Cargando órdenes...</div>
-          ) : recentOrders.length === 0 ? (
-            <div className="p-8 text-center">
-              <div className="text-4xl">📋</div>
-
-              <h3 className="mt-3 font-medium text-gray-900">
-                No hay órdenes registradas
-              </h3>
-
-              <p className="mt-1 text-sm text-gray-500">
-                Cuando se creen órdenes aparecerán aquí.
-              </p>
-            </div>
-          ) : (
-            <div className="divide-y divide-gray-100">
-              {recentOrders.map((order) => (
-                <div
-                  key={order.id}
-                  className="flex flex-col gap-3 p-5 transition hover:bg-gray-50 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-gray-900">
-                        OT #{order.order_number}
-                      </span>
-
-                      <span
-                        className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                          statusStyles[order.status] ??
-                          "bg-gray-100 text-gray-700"
-                        }`}
-                      >
-                        {statusLabels[order.status] ?? order.status}
-                      </span>
-                    </div>
-
-                    <p className="mt-1 truncate text-sm text-gray-600">
-                      {order.description || "Sin descripción"}
-                    </p>
-
-                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
-                      <span>🏢 {order.site?.name || "Sin sede"}</span>
-
-                      <span>📅 {formatDate(order.scheduled_date)}</span>
-
-                      {order.maintenance_type && (
-                        <span>🔧 {order.maintenance_type}</span>
-                      )}
-                    </div>
-                  </div>
-
-                  <Link
-                    href={`/dashboard/ordenes/${order.id}`}
-                    className="shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
-                  >
-                    Ver órdenes
-                  </Link>
-                </div>
-              ))}
-            </div>
-          )}
+        <section className="app-card overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-5 sm:px-6"><div><h2 className="text-lg font-semibold text-slate-50">Órdenes recientes</h2><p className="mt-1 text-sm text-slate-400">Últimas órdenes registradas en el sistema.</p></div><Link href="/dashboard/ordenes/todas" className="inline-flex items-center gap-1 text-sm font-semibold text-blue-300 hover:text-blue-200">Ver todas <AppIcon name="arrow" className="h-4 w-4" /></Link></div>
+          {loadingOrders ? <div className="p-6 text-sm text-slate-400">Cargando órdenes…</div> : recentOrders.length === 0 ? (
+            <div className="p-10 text-center"><AppIcon name="document" className="mx-auto h-10 w-10 text-blue-300/70" /><h3 className="mt-3 font-semibold text-slate-100">No hay órdenes registradas</h3><p className="mt-1 text-sm text-slate-400">Cuando se creen órdenes aparecerán aquí.</p></div>
+          ) : <>
+            <div className="hidden overflow-x-auto md:block"><table className="app-table min-w-[720px] text-left text-sm"><thead className="text-xs uppercase tracking-wide"><tr><th className="px-5 py-3">OT</th><th className="px-4 py-3">AVISO</th><th className="px-4 py-3">Sede</th><th className="px-4 py-3">Tipo</th><th className="px-4 py-3">Estado</th><th className="px-4 py-3">Fecha</th></tr></thead><tbody>{recentOrders.map(order => <tr key={order.id}><td className="px-5 py-4 font-semibold"><Link href={`/dashboard/ordenes/${order.id}`} className="text-blue-300 hover:underline">OT-{String(order.order_number).padStart(6,"0")}</Link></td><td className="max-w-64 truncate px-4 py-4 text-slate-200" title={order.aviso || "Sin aviso"}>{order.aviso || "Sin aviso"}</td><td className="px-4 py-4 text-slate-300">{order.site?.name || "Sin sede"}</td><td className="px-4 py-4 capitalize text-slate-300">{order.maintenance_type || "—"}</td><td className="px-4 py-4"><StatusBadge status={order.status} /></td><td className="px-4 py-4 text-slate-400">{formatDate(order.scheduled_date)}</td></tr>)}</tbody></table></div>
+            <div className="divide-y divide-white/10 md:hidden">{recentOrders.map(order => <Link key={order.id} href={`/dashboard/ordenes/${order.id}`} className="block px-5 py-4 transition hover:bg-white/5"><div className="flex items-center justify-between gap-2"><span className="font-semibold text-blue-300">OT-{String(order.order_number).padStart(6,"0")}</span><StatusBadge status={order.status} /></div><p className="mt-2 truncate text-sm font-medium text-slate-100">{order.aviso || "Sin aviso"}</p><p className="mt-1 text-xs text-slate-400">{order.site?.name || "Sin sede"} · {formatDate(order.scheduled_date)}</p></Link>)}</div>
+          </>}
         </section>
       </div>
     </main>
@@ -458,74 +336,29 @@ function MetricCard({
   value,
   description,
   icon,
+  tone,
   href,
 }: {
   title: string;
   value: number;
   description: string;
-  icon: string;
+  icon: AppIconName;
+  tone: "amber" | "blue" | "cyan" | "green" | "violet" | "red";
   href: string;
 }) {
   return (
     <Link
       href={href}
-      className="group block cursor-pointer rounded-2xl bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:ring-2 hover:ring-blue-100 hover:shadow-md"
+      className="app-card app-hover-card group block min-w-0 cursor-pointer p-4 sm:p-5"
     >
-      <div className="flex items-start justify-between">
+      <div className="flex h-full flex-col justify-between gap-5">
         <div>
-          <p className="text-sm font-medium text-gray-500">{title}</p>
-
-          <p className="mt-2 text-3xl font-bold text-gray-900">{value}</p>
-
-          <p className="mt-1 text-xs text-gray-500">{description}</p>
-        </div>
-
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gray-100 text-xl transition group-hover:bg-blue-50">
-          {icon}
+          <span className={`mb-4 flex h-10 w-10 items-center justify-center rounded-xl ${toneClass[tone]}`}><AppIcon name={icon} className="h-5 w-5" /></span>
+          <p className="text-xs font-medium text-slate-400 sm:text-sm">{title}</p>
+          <p className="mt-1 text-3xl font-bold tracking-tight text-slate-50">{value}</p>
+          <p className="mt-1 hidden text-xs text-slate-500 sm:block">{description}</p>
         </div>
       </div>
     </Link>
   );
-}
-
-function StatusCard({
-  title,
-  value,
-  description,
-  icon,
-  href,
-}: {
-  title: string;
-  value: number;
-  description: string;
-  icon: string;
-  href?: string;
-}) {
-  const content = (
-    <>
-      <div className="flex items-start gap-4">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-xl">
-          {icon}
-        </div>
-
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-gray-500">{title}</p>
-
-          <p className="mt-1 text-2xl font-bold text-gray-900">{value}</p>
-
-          <p className="mt-1 text-xs leading-5 text-gray-500">{description}</p>
-        </div>
-      </div>
-    </>
-  );
-  if (href)
-    return (
-      <Link
-        href={href}
-        className="block cursor-pointer rounded-2xl bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:ring-2 hover:ring-blue-100 hover:shadow-md"
-      >
-        {content}
-      </Link>
-    );
-  return <div className="rounded-2xl bg-white p-5 shadow-sm">{content}</div>;
 }
